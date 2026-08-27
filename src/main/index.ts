@@ -14,7 +14,12 @@ app.setPath('userData', join(app.getPath('appData'), 'project-tool'))
 let win: BrowserWindow | null = null
 
 function createWindow(): void {
-  win = new BrowserWindow({ width: 1100, height: 760, title: '项目启动器' })
+  win = new BrowserWindow({
+    width: 1100,
+    height: 760,
+    title: '项目启动器',
+    webPreferences: { preload: join(__dirname, '../preload/index.js') }
+  })
   win.on('closed', () => { win = null })
   if (process.env['ELECTRON_RENDERER_URL']) win.loadURL(process.env['ELECTRON_RENDERER_URL'])
   else win.loadFile(join(__dirname, '../renderer/index.html'))
