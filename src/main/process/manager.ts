@@ -67,7 +67,7 @@ export class ProcessManager {
     const k = runtimeKey(project.id, command.id)
     const e = this.entry(k)
     if (e.status === 'starting' || e.status === 'running') return
-    e.status = 'starting'
+    this.setStatus(k, e, project.id, command.id, 'starting')
     e.logs = []
     e.partial = ''
     e.pending = []
@@ -127,6 +127,45 @@ export class ProcessManager {
       this.setStatus(k, e, project.id, command.id, 'failed')
       void this.killEntry(k, e)
     }, this.opts.startupTimeoutMs())
+  }
+
+  /** 停止单条命令（运行中或启动中才需要停） */
+  async stop(projectId: string, commandId: string): Promise<void> {
+    const k = runtimeKey(projectId, commandId)
+    const e = this.entries.get(k)
+    if (!e || (e.status !== 'running' && e.status !== 'starting')) return
+    this.clearTimers(e)
+    this.setStatus(k, e, projectId, commandId, 'stopped')
+    await this.killEntry(k, e)
+  }
+
+  /** 停止项目全部运行中/启动中的命令 */
+  async stopProject(project: Project): Promise<void> {
+    await Promise.all(
+      project.commands
+        .filter(c => ['running', 'starting'].includes(this.statusOf(project.id, c.id)))
+        .map(c => this.stop(project.id, c.id))
+    )
+  }
+
+  /** 应用重启后的状态恢复：pid 存活 && 端口有服务 → running（此后可按 pgid 停止）；否则丢弃记录 */
+  async restore(projects: Project[], runtime: RuntimeFile): Promise<void> {
+    this.runtime = {}
+    for (const p of projects) {
+      for (const c of p.commands) {
+        const k = runtimeKey(p.id, c.id)
+        const rec = runtime[k]
+        if (!rec) continue
+        const live = this.alive(rec.pid)
+        if (live && (await probe(healthUrlOf(c)))) {
+          const e = this.entry(k)
+          e.status = 'running'
+          e.pid = rec.pid
+          this.runtime[k] = rec
+        }
+      }
+    }
+    this.emitRuntime()
   }
 
   // ---- 内部工具 ----

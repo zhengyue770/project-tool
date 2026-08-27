@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { kill } from 'node:process'
 import type { Project, RuntimeFile } from '../../shared/types'
 import { ProcessManager } from './manager'
+import { probe } from './health'
 import { waitFor } from '../../../tests/helpers'
 
 const FIXTURE = join(process.cwd(), 'tests/fixtures/server.mjs')
@@ -76,5 +77,82 @@ describe('ProcessManager 启动链路', () => {
     await waitFor(() => m.statusOf('p1', 'c1') === 'running')
     expect(saved?.['p1:c1']?.pid).toBeGreaterThan(0)
     await waitFor(() => m.logsOf('p1', 'c1').some(l => l.includes('heartbeat')))
+  })
+})
+
+describe('ProcessManager 停止与恢复', () => {
+  it('stop 杀整个进程组（孙进程一并退出）', async () => {
+    const p = port()
+    const proj = mkProject(p, `node ${FIXTURE} ${p}`)
+    const m = mkManager()
+    m.start(proj, proj.commands[0])
+    await waitFor(() => m.statusOf('p1', 'c1') === 'running')
+    const line = m.logsOf('p1', 'c1').find(l => l.includes('GRANDCHILD_PID'))
+    const grand = Number(line?.match(/GRANDCHILD_PID:(\d+)/)?.[1])
+    expect(alive(grand)).toBe(true)
+    await m.stop('p1', 'c1')
+    expect(m.statusOf('p1', 'c1')).toBe('stopped')
+    await waitFor(() => !alive(grand))
+  })
+
+  it('拒收 SIGTERM 的进程在宽限后被 SIGKILL', async () => {
+    const p = port()
+    const proj = mkProject(p, `node ${FIXTURE} ${p} 0 ignore-term`)
+    const m = mkManager({ killGraceMs: 800 })
+    m.start(proj, proj.commands[0])
+    await waitFor(() => m.statusOf('p1', 'c1') === 'running')
+    await m.stop('p1', 'c1')
+    const line = m.logsOf('p1', 'c1').find(l => l.includes('GRANDCHILD_PID'))
+    const grand = Number(line?.match(/GRANDCHILD_PID:(\d+)/)?.[1])
+    await waitFor(() => !alive(grand))
+  })
+
+  it('restore：pid 存活且端口有服务 → 恢复 running 且可停止', async () => {
+    const p = port()
+    // 手动 detached 起一个"上次遗留"的进程（pgid === pid）
+    const { spawn } = await import('node:child_process')
+    const left = spawn(`node ${FIXTURE} ${p}`, { shell: true, detached: true, stdio: 'ignore' })
+    for (let i = 0; i < 100 && !(await probe(`http://127.0.0.1:${p}`)); i++) {
+      await new Promise(r => setTimeout(r, 50))
+    }
+    const proj = mkProject(p, `node ${FIXTURE} ${p}`)
+    const m = mkManager()
+    await m.restore([proj], { 'p1:c1': { pid: left.pid as number, startedAt: Date.now() } })
+    expect(m.statusOf('p1', 'c1')).toBe('running')
+    await m.stop('p1', 'c1')
+    await waitFor(() => !alive(left.pid as number))
+  })
+
+  it('restore：pid 已死 → stopped', async () => {
+    const p = port()
+    const proj = mkProject(p, `node ${FIXTURE} ${p}`)
+    const m = mkManager()
+    await m.restore([proj], { 'p1:c1': { pid: 99999, startedAt: Date.now() } })
+    expect(m.statusOf('p1', 'c1')).toBe('stopped')
+  })
+
+  it('statusListener 收到 starting/running 事件', async () => {
+    const p = port()
+    const proj = mkProject(p, `node ${FIXTURE} ${p}`)
+    const m = mkManager()
+    const got: string[] = []
+    m.setStatusListener(e => got.push(e.status))
+    m.start(proj, proj.commands[0])
+    await waitFor(() => m.statusOf('p1', 'c1') === 'running')
+    expect(got).toContain('starting')
+    expect(got).toContain('running')
+    await m.stop('p1', 'c1')
+    expect(got).toContain('stopped')
+  })
+
+  it('subscribeLogs 推送新增日志行', async () => {
+    const p = port()
+    const proj = mkProject(p, `node ${FIXTURE} ${p}`)
+    const m = mkManager()
+    m.start(proj, proj.commands[0])
+    await waitFor(() => m.statusOf('p1', 'c1') === 'running')
+    const received: string[] = []
+    m.subscribeLogs('p1', 'c1', lines => received.push(...lines))
+    await waitFor(() => received.some(l => l.includes('heartbeat')))
   })
 })
