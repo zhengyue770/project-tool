@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { join } from 'node:path'
 import { kill } from 'node:process'
-import type { Project, RuntimeFile } from '../../shared/types'
+import type { CommandConfig, Project, RuntimeFile } from '../../shared/types'
 import { ProcessManager } from './manager'
 import { probe } from './health'
 import { waitFor } from '../../../tests/helpers'
@@ -9,10 +9,10 @@ import { waitFor } from '../../../tests/helpers'
 const FIXTURE = join(process.cwd(), 'tests/fixtures/server.mjs')
 const port = (): number => 45670 + Math.floor(Math.random() * 1000)
 
-function mkProject(p: number, cmd: string): Project {
+function mkProject(p: number, cmd: string, over?: Partial<CommandConfig>): Project {
   return {
     id: 'p1', name: 't', path: process.cwd(),
-    commands: [{ id: 'c1', name: 'srv', cmd, workdir: '.', port: p }],
+    commands: [{ id: 'c1', name: 'srv', cmd, workdir: '.', port: p, ...over }],
     urls: [], accounts: [], createdAt: 0
   }
 }
@@ -175,5 +175,32 @@ describe('ProcessManager 停止与恢复', () => {
     const received: string[] = []
     m.subscribeLogs('p1', 'c1', lines => received.push(...lines))
     await waitFor(() => received.some(l => l.includes('heartbeat')))
+  })
+})
+
+describe('ProcessManager 动态端口', () => {
+  it('动态模式：从日志捕获真实端口并确认后 running', async () => {
+    const proj = mkProject(0, `node ${FIXTURE} auto`, { portMode: 'dynamic' })
+    const m = mkManager()
+    m.start(proj, proj.commands[0])
+    await waitFor(() => m.statusOf('p1', 'c1') === 'running')
+    // 捕获的端口必须等于 fixture 实际监听端口（从 Local: 行反查）
+    const localLine = m.logsOf('p1', 'c1').find(l => l.includes('Local:'))
+    const realPort = Number(localLine?.match(/localhost:(\d+)/)?.[1])
+    expect(realPort).toBeGreaterThan(0)
+    expect(m.discoveredPortOf('p1', 'c1')).toBe(realPort)
+    expect(m.logsOf('p1', 'c1').join('\n')).toContain('[自动发现]')
+  })
+
+  it('动态模式：日志无地址则超时失败', async () => {
+    const proj = mkProject(0, 'node -e "setInterval(()=>{},1000)"', { portMode: 'dynamic' })
+    const m = mkManager({ startupTimeoutMs: () => 800 })
+    m.start(proj, proj.commands[0])
+    await waitFor(() => m.statusOf('p1', 'c1') === 'failed')
+    const all = m.logsOf('p1', 'c1').join('\n')
+    expect(all).toContain('超时')
+    // 动态模式超时提示须注明未从日志发现地址（区别于固定模式的"端口 N 未就绪"）
+    expect(all).toContain('未从日志发现服务地址')
+    expect(m.discoveredPortOf('p1', 'c1')).toBeNull()
   })
 })

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { CaretRight, Delete, EditPen, Document, Link, SwitchButton } from '@element-plus/icons-vue'
-import type { CommandRuntimeStatus, ProjectView } from '../../../shared/types'
+import type { CommandConfig, CommandRuntimeStatus, ProjectView } from '../../../shared/types'
 import { api } from '../api'
 import AccountsPopover from './AccountsPopover.vue'
 
@@ -25,6 +25,14 @@ const CMD_META: Record<CommandRuntimeStatus, { label: string; color: string }> =
   stopped: { label: '已停止', color: '#909399' }
 }
 function st(id: string): CommandRuntimeStatus { return props.project.commandStates[id] ?? 'stopped' }
+/** v1.1：动态模式显示实际捕获的端口（未捕获时省略号），固定模式沿用配置端口 */
+function portLabel(c: CommandConfig): string {
+  if ((c.portMode ?? 'fixed') === 'dynamic') {
+    const p = props.project.discoveredPorts?.[c.id]
+    return p ? `:${p}` : ':…'
+  }
+  return `:${c.port}`
+}
 </script>
 
 <template>
@@ -41,7 +49,7 @@ function st(id: string): CommandRuntimeStatus { return props.project.commandStat
       style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px">
       <span :style="{ background: CMD_META[st(c.id)].color, width: '8px', height: '8px', borderRadius: '4px' }" />
       <span style="min-width: 60px">{{ c.name }}</span>
-      <span style="color: #909399">:{{ c.port }}</span>
+      <span style="color: #909399">{{ portLabel(c) }}</span>
       <span :style="{ color: CMD_META[st(c.id)].color, flex: 1 }">{{ CMD_META[st(c.id)].label }}</span>
       <el-button v-if="st(c.id) === 'stopped' || st(c.id) === 'failed'" link type="primary" size="small"
         @click="api.startProject(project.id, c.id)">启动</el-button>

@@ -23,8 +23,12 @@ interface IpcCtx {
 
 function toView(p: Project, m: ProcessManager): ProjectView {
   const commandStates: Record<string, CommandRuntimeStatus> = {}
-  for (const c of p.commands) commandStates[c.id] = m.statusOf(p.id, c.id)
-  return { ...p, commandStates, aggStatus: aggregateProjectStatus(Object.values(commandStates)) }
+  const discoveredPorts: Record<string, number | null> = {}
+  for (const c of p.commands) {
+    commandStates[c.id] = m.statusOf(p.id, c.id)
+    discoveredPorts[c.id] = m.discoveredPortOf(p.id, c.id) // 固定模式恒 null
+  }
+  return { ...p, commandStates, discoveredPorts, aggStatus: aggregateProjectStatus(Object.values(commandStates)) }
 }
 
 function validateProject(p: Project): void {
@@ -33,8 +37,18 @@ function validateProject(p: Project): void {
   if (!p.commands?.length) throw new Error('至少需要一条启动命令')
   for (const c of p.commands) {
     if (!c.cmd?.trim()) throw new Error('启动命令不能为空')
-    if (!Number.isInteger(c.port) || c.port < 1 || c.port > 65535)
+    if (c.portMode === 'dynamic') {
+      // 动态模式：端口被忽略（存 0），改校验自定义正则可编译
+      const pat = c.successPattern?.trim()
+      if (pat) {
+        try { new RegExp(pat) } catch (err) {
+          throw new Error(`命令「${c.name}」的自定义匹配正则无法编译：${(err as Error).message}`)
+        }
+      }
+    } else if (!Number.isInteger(c.port) || c.port < 1 || c.port > 65535) {
+      // fixed（含缺省 portMode 的旧配置）：维持现行端口校验
       throw new Error(`命令「${c.name}」端口需为 1-65535 的整数`)
+    }
   }
 }
 
@@ -48,7 +62,8 @@ export function registerIpc(ctx: IpcCtx): void {
     if (!win || !p) return
     const view = toView(p, manager)
     win.webContents.send('projects:events', {
-      projectId, aggStatus: view.aggStatus, commandStates: view.commandStates
+      projectId, aggStatus: view.aggStatus, commandStates: view.commandStates,
+      discoveredPorts: view.discoveredPorts
     })
   }
   manager.setStatusListener(ev => pushEvent(ev.projectId))

@@ -18,6 +18,9 @@ export interface CommandStatusEvent { projectId: string; commandId: string; stat
 
 const MAX_LOG_LINES = 500
 
+/** v1.1 动态端口：内置捕获规则（不加 g 标志——复用 exec 不受 lastIndex 影响） */
+const DEFAULT_PORT_RE = /(?:localhost|127\.0\.0\.1):(\d{2,5})/
+
 interface Entry {
   status: CommandRuntimeStatus
   pid?: number
@@ -31,6 +34,12 @@ interface Entry {
   logSubs: Set<(lines: string[]) => void>
   /** 启动代际：每次 start() 自增；旧一轮的 exit/error/定时器回调凭 gen 失效，避免污染新一轮运行 */
   gen: number
+  /** v1.1：本次运行的端口模式（动态=从日志捕获真实地址再探测） */
+  dynamic: boolean
+  /** v1.1：生效的端口捕获正则（仅动态模式有值） */
+  pattern?: RegExp
+  /** v1.1：已捕获到的服务地址；未捕获为 null */
+  discoveredUrl?: string | null
 }
 
 export class ProcessManager {
@@ -65,6 +74,13 @@ export class ProcessManager {
     return () => e.logSubs.delete(cb)
   }
 
+  discoveredPortOf(projectId: string, commandId: string): number | null {
+    const url = this.entries.get(runtimeKey(projectId, commandId))?.discoveredUrl
+    if (!url) return null
+    const m = /(\d+)$/.exec(url) // 只从尾部取端口，避免 URL 解析对边缘地址报错
+    return m ? Number(m[1]) : null
+  }
+
   start(project: Project, command: CommandConfig): void {
     const k = runtimeKey(project.id, command.id)
     const e = this.entry(k)
@@ -76,6 +92,14 @@ export class ProcessManager {
     e.logs = []
     e.partial = ''
     e.pending = []
+    // v1.1 端口模式：ipc 层已校验自定义正则可编译，这里 try/catch 兜底用内置规则
+    e.dynamic = command.portMode === 'dynamic'
+    if (e.dynamic && command.successPattern?.trim()) {
+      try { e.pattern = new RegExp(command.successPattern.trim()) } catch { e.pattern = DEFAULT_PORT_RE }
+    } else {
+      e.pattern = e.dynamic ? DEFAULT_PORT_RE : undefined
+    }
+    e.discoveredUrl = null
 
     const cwd = resolve(project.path, command.workdir || '.')
     const child = spawn(command.cmd, {
@@ -119,10 +143,12 @@ export class ProcessManager {
       if (was === 'starting' || was === 'running') this.setStatus(k, e, project.id, command.id, 'failed')
     })
 
-    const url = healthUrlOf(command)
+    const url = healthUrlOf(command) // 固定模式探测地址原样；动态模式下忽略 healthCheckUrl
     e.healthTimer = setInterval(async () => {
       if (gen !== e.gen || e.status !== 'starting') return
-      if (await probe(url)) {
+      if (e.dynamic && !e.discoveredUrl) return // 动态模式未捕获前不发请求
+      const target = e.discoveredUrl ?? url
+      if (await probe(target)) {
         // 防御性复查：await probe 期间可能已超时/停止/被新一轮 start 取代，避免竞态把 failed 翻回 running
         if (gen !== e.gen || e.status !== 'starting') return
         this.clearTimers(e)
@@ -133,7 +159,9 @@ export class ProcessManager {
     e.timeoutTimer = setTimeout(() => {
       if (gen !== e.gen || e.status !== 'starting') return
       this.clearTimers(e) // 健康轮询与本次超时定时器一并清理
-      this.append(e, `[超时] ${this.opts.startupTimeoutMs()}ms 内端口 ${command.port} 未就绪，终止进程`)
+      this.append(e, e.dynamic
+        ? `[超时] ${this.opts.startupTimeoutMs()}ms 内未从日志发现服务地址或地址未就绪，终止进程`
+        : `[超时] ${this.opts.startupTimeoutMs()}ms 内端口 ${command.port} 未就绪，终止进程`)
       this.setStatus(k, e, project.id, command.id, 'failed')
       void this.killEntry(k, e)
     }, this.opts.startupTimeoutMs())
@@ -183,7 +211,7 @@ export class ProcessManager {
   private entry(k: string): Entry {
     let e = this.entries.get(k)
     if (!e) {
-      e = { status: 'stopped', logs: [], partial: '', pending: [], logSubs: new Set(), gen: 0 }
+      e = { status: 'stopped', logs: [], partial: '', pending: [], logSubs: new Set(), gen: 0, dynamic: false }
       this.entries.set(k, e)
     }
     return e
@@ -214,12 +242,31 @@ export class ProcessManager {
     e.logs.push(stamped)
     if (e.logs.length > MAX_LOG_LINES) e.logs.splice(0, e.logs.length - MAX_LOG_LINES)
     e.pending.push(stamped)
+    this.maybeCapturePort(e, stamped)
     if (!e.flushTimer) {
       e.flushTimer = setTimeout(() => {
         e.flushTimer = undefined
         this.flush(e)
       }, 300)
     }
+  }
+
+  /** v1.1 动态端口：starting 期间逐行捕获服务地址；首个捕获生效，后续不再改写 */
+  private maybeCapturePort(e: Entry, stamped: string): void {
+    if (!e.dynamic || !e.pattern || e.status !== 'starting' || e.discoveredUrl) return
+    const m = e.pattern.exec(stamped)
+    if (!m) return
+    let port: number | undefined =
+      m[1] && /^\d{2,5}$/.test(m[1]) ? Number(m[1]) : undefined
+    if (port === undefined) {
+      const u = DEFAULT_PORT_RE.exec(m[0])
+      if (!u) return
+      port = Number(u[1])
+    }
+    if (!(port >= 1 && port <= 65535)) return
+    e.discoveredUrl = `http://127.0.0.1:${port}`
+    const line = `[自动发现] 服务地址 ${e.discoveredUrl}`
+    e.logs.push(line); e.pending.push(line)
   }
 
   private flush(e: Entry): void {
