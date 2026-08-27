@@ -68,11 +68,21 @@ app.whenReady().then(async () => {
     }
   }
 
+  // spec §8：projects.json 损坏时界面提示（仅启动时检查一次，本会话后续 projects:list 不再弹）
+  let projectsCorrupted = false
+  const projectsFile = projectsStore.load(() => { projectsCorrupted = true })
+  if (projectsCorrupted) {
+    dialog.showErrorBox(
+      '配置文件已损坏',
+      'projects.json 无法解析，已备份为 projects.json.bak 并重建了空配置。原数据在备份文件中，可手动恢复。'
+    )
+  }
+
   const manager = new ProcessManager({
     startupTimeoutMs: () => settingsStore.load().startupTimeoutMs,
     onRuntimeChange: rf => runtimeStore.save(rf)
   })
-  await manager.restore(projectsStore.load().projects, runtimeStore.load())
+  await manager.restore(projectsFile.projects, runtimeStore.load())
 
   registerIpc({ getWin: () => win, paths, projectsStore, settingsStore, runtimeStore, manager })
 })

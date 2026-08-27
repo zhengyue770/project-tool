@@ -107,6 +107,27 @@ describe('ProcessManager 停止与恢复', () => {
     await waitFor(() => !alive(grand))
   })
 
+  it('停止未完成时重启：旧进程退出不污染新启动', async () => {
+    const p1 = port()
+    const proj = mkProject(p1, `node ${FIXTURE} ${p1} 0 ignore-term`) // 拒收 SIGTERM，拉宽停止窗口
+    let saved: RuntimeFile | undefined
+    const m = mkManager({ killGraceMs: 500, onRuntimeChange: rf => (saved = rf) })
+    m.start(proj, proj.commands[0])
+    await waitFor(() => m.statusOf('p1', 'c1') === 'running')
+    void m.stop('p1', 'c1') // 不等待：killEntry 异步走 SIGTERM→宽限→SIGKILL
+    const p2 = port()
+    proj.commands[0].port = p2 // 同一命令配置换成新端口的第二个实例后立即重启
+    proj.commands[0].cmd = `node ${FIXTURE} ${p2} 0 ignore-term`
+    m.start(proj, proj.commands[0])
+    await waitFor(() => m.statusOf('p1', 'c1') === 'running')
+    const newPid = saved?.['p1:c1']?.pid
+    expect(newPid).toBeGreaterThan(0)
+    // 等旧进程被 SIGKILL、其 exit 事件回来之后：新运行必须仍是 running 且 runtime 记录仍指向新 pid
+    await new Promise(r => setTimeout(r, 2000))
+    expect(m.statusOf('p1', 'c1')).toBe('running')
+    expect(saved?.['p1:c1']?.pid).toBe(newPid)
+  })
+
   it('restore：pid 存活且端口有服务 → 恢复 running 且可停止', async () => {
     const p = port()
     // 手动 detached 起一个"上次遗留"的进程（pgid === pid）

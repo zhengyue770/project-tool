@@ -41,6 +41,15 @@ describe('ProjectsStore', () => {
     expect(existsSync(file + '.bak')).toBe(true)
     rmSync(dir, { recursive: true, force: true })
   })
+  it('损坏时 load(onCorrupt) 回调收到 .bak 路径（主进程据此弹窗）', () => {
+    const dir = tmp(); const file = join(dir, 'projects.json')
+    writeFileSync(file, 'not json')
+    const s = new ProjectsStore(() => dir)
+    const baks: string[] = []
+    expect(s.load(bak => baks.push(bak))).toEqual(EMPTY_PROJECTS)
+    expect(baks).toEqual([file + '.bak'])
+    rmSync(dir, { recursive: true, force: true })
+  })
   it('save 后无 .tmp 残留（原子写）', () => {
     const dir = tmp(); const s = new ProjectsStore(() => dir)
     s.upsert(proj)

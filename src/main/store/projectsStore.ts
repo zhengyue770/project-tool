@@ -10,10 +10,12 @@ export class ProjectsStore {
 
   private file(): string { return join(this.dir(), 'projects.json') }
 
-  load(): ProjectsFile {
-    const pf = readJson<ProjectsFile>(this.file(), EMPTY_PROJECTS, bak =>
+  /** 损坏回调（spec §8 界面提示）：主进程启动时传入以弹窗告知；其余调用点仅 console.warn */
+  load(onCorrupt?: (bak: string) => void): ProjectsFile {
+    const pf = readJson<ProjectsFile>(this.file(), EMPTY_PROJECTS, bak => {
       console.warn(`projects.json 损坏，已备份到 ${bak}`)
-    )
+      onCorrupt?.(bak)
+    })
     return pf && Array.isArray(pf.projects) ? { version: 1, projects: pf.projects } : EMPTY_PROJECTS
   }
 

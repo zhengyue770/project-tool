@@ -69,6 +69,13 @@ function validate(): string | null {
 async function save(): Promise<void> {
   const err = validate()
   if (err) { ElMessage.warning(err); return }
+  // spec §7.2：多个命令配置同一端口时提示警告，但允许保存（仅提示第一个重复端口）
+  const seen = new Set<number>()
+  for (const c of f.commands) {
+    const p = Number(c.port)
+    if (seen.has(p)) { ElMessage.warning(`多个命令使用端口 ${p}，可能互相冲突`); break }
+    seen.add(p)
+  }
   const project: Project = {
     id: f.id,
     name: f.name.trim(),

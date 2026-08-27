@@ -29,6 +29,8 @@ interface Entry {
   healthTimer?: NodeJS.Timeout
   timeoutTimer?: NodeJS.Timeout
   logSubs: Set<(lines: string[]) => void>
+  /** 启动代际：每次 start() 自增；旧一轮的 exit/error/定时器回调凭 gen 失效，避免污染新一轮运行 */
+  gen: number
 }
 
 export class ProcessManager {
@@ -67,6 +69,9 @@ export class ProcessManager {
     const k = runtimeKey(project.id, command.id)
     const e = this.entry(k)
     if (e.status === 'starting' || e.status === 'running') return
+    e.gen++ // 新一轮运行：上一轮残留的回调/定时器凭旧 gen 失效
+    const gen = e.gen
+    this.clearTimers(e) // 上一轮可能残留的定时器（如超时路径未清的健康轮询）一并清掉
     this.setStatus(k, e, project.id, command.id, 'starting')
     e.logs = []
     e.partial = ''
@@ -89,6 +94,8 @@ export class ProcessManager {
     child.stdout?.on('data', (d: Buffer) => this.ingest(e, d))
     child.stderr?.on('data', (d: Buffer) => this.ingest(e, d))
     child.on('exit', () => {
+      // 代际守卫：旧进程退出时该 entry 可能已被新一轮 start 接管，不能动新运行的状态/timers/runtime
+      if (gen !== e.gen) return
       this.clearTimers(e)
       const was = e.status
       e.child = undefined
@@ -99,6 +106,8 @@ export class ProcessManager {
       else if (was === 'running') this.setStatus(k, e, project.id, command.id, 'stopped')
     })
     child.on('error', err => {
+      // 代际守卫：同 exit——旧 child 的 error 不属于当前运行
+      if (gen !== e.gen) return
       // spawn 失败（如 workdir 指向不存在的目录）：异步 error 事件，exit 可能不再触发
       this.append(e, `[错误] ${String(err)}`)
       this.clearTimers(e)
@@ -112,17 +121,18 @@ export class ProcessManager {
 
     const url = healthUrlOf(command)
     e.healthTimer = setInterval(async () => {
-      if (e.status !== 'starting') return
+      if (gen !== e.gen || e.status !== 'starting') return
       if (await probe(url)) {
-        // 防御性复查：await probe 期间可能已超时/停止，避免竞态把 failed 翻回 running
-        if (e.status !== 'starting') return
+        // 防御性复查：await probe 期间可能已超时/停止/被新一轮 start 取代，避免竞态把 failed 翻回 running
+        if (gen !== e.gen || e.status !== 'starting') return
         this.clearTimers(e)
         this.setStatus(k, e, project.id, command.id, 'running')
       }
     }, this.opts.healthIntervalMs ?? 2000)
 
     e.timeoutTimer = setTimeout(() => {
-      if (e.status !== 'starting') return
+      if (gen !== e.gen || e.status !== 'starting') return
+      this.clearTimers(e) // 健康轮询与本次超时定时器一并清理
       this.append(e, `[超时] ${this.opts.startupTimeoutMs()}ms 内端口 ${command.port} 未就绪，终止进程`)
       this.setStatus(k, e, project.id, command.id, 'failed')
       void this.killEntry(k, e)
@@ -173,7 +183,7 @@ export class ProcessManager {
   private entry(k: string): Entry {
     let e = this.entries.get(k)
     if (!e) {
-      e = { status: 'stopped', logs: [], partial: '', pending: [], logSubs: new Set() }
+      e = { status: 'stopped', logs: [], partial: '', pending: [], logSubs: new Set(), gen: 0 }
       this.entries.set(k, e)
     }
     return e
@@ -223,6 +233,16 @@ export class ProcessManager {
     try { kill(pid, 0); return true } catch { return false }
   }
 
+  /** 进程组存活探测（spec §5.2）：kill(-pid, 0)——ESRCH 表示整组已消失；EPERM 表示组内仍有进程（视为存活） */
+  private groupAlive(pid: number): boolean {
+    try {
+      kill(-pid, 0)
+      return true
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === 'EPERM'
+    }
+  }
+
   private killGroup(pid: number, sig: NodeJS.Signals): boolean {
     try { kill(-pid, sig); return true } catch { return false }
   }
@@ -230,17 +250,20 @@ export class ProcessManager {
   /** 杀整个进程组：SIGTERM → 等 killGraceMs → SIGKILL；并清理 runtime 记录 */
   private async killEntry(k: string, e: Entry): Promise<void> {
     const pid = e.pid
-    if (pid && this.alive(pid)) {
+    const gen = e.gen // 停止期间可能已被新一轮 start 接管：旧 pid 照杀，但 runtime 清理需守卫
+    if (pid && this.groupAlive(pid)) {
       this.killGroup(pid, 'SIGTERM')
       const grace = this.opts.killGraceMs ?? 5000
       const t0 = Date.now()
-      while (this.alive(pid) && Date.now() - t0 < grace) {
+      while (this.groupAlive(pid) && Date.now() - t0 < grace) {
         await new Promise(r => setTimeout(r, 200))
       }
-      if (this.alive(pid)) this.killGroup(pid, 'SIGKILL')
+      if (this.groupAlive(pid)) this.killGroup(pid, 'SIGKILL')
     }
-    delete this.runtime[k]
-    this.emitRuntime()
+    if (gen === e.gen) {
+      delete this.runtime[k]
+      this.emitRuntime()
+    }
   }
 
   /** 测试后门：清理本 manager 启动的所有进程（Task 6 由 stopProject 委托） */

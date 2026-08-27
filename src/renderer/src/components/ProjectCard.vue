@@ -39,7 +39,7 @@ function st(id: string): CommandRuntimeStatus { return props.project.commandStat
 
     <div v-for="c in project.commands" :key="c.id"
       style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px">
-      <span :style="{ background: CMD_META[st(c.id)].color, width: 8, height: 8, borderRadius: 4 }" />
+      <span :style="{ background: CMD_META[st(c.id)].color, width: '8px', height: '8px', borderRadius: '4px' }" />
       <span style="min-width: 60px">{{ c.name }}</span>
       <span style="color: #909399">:{{ c.port }}</span>
       <span :style="{ color: CMD_META[st(c.id)].color, flex: 1 }">{{ CMD_META[st(c.id)].label }}</span>
