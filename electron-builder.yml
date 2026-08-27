@@ -1,0 +1,13 @@
+appId: com.zhengyue.projecttool
+productName: 项目启动器
+directories:
+  output: release
+files:
+  - out/**
+  - package.json
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+  category: public.app-category.developer-tools
