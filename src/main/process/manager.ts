@@ -53,6 +53,7 @@ export class ProcessManager {
     const e = this.entry(runtimeKey(projectId, commandId))
     e.logs = []
     e.partial = ''
+    e.pending = [] // 清空待刷送队列，避免已清空的日志再次推给订阅者
     this.flush(e)
   }
 
@@ -97,11 +98,24 @@ export class ProcessManager {
       if (was === 'starting') this.setStatus(k, e, project.id, command.id, 'failed')
       else if (was === 'running') this.setStatus(k, e, project.id, command.id, 'stopped')
     })
+    child.on('error', err => {
+      // spawn 失败（如 workdir 指向不存在的目录）：异步 error 事件，exit 可能不再触发
+      this.append(e, `[错误] ${String(err)}`)
+      this.clearTimers(e)
+      const was = e.status
+      e.child = undefined
+      delete this.runtime[k]
+      this.emitRuntime()
+      // 仅在尚未被超时/停止流程处置时标记 failed，避免重复发事件
+      if (was === 'starting' || was === 'running') this.setStatus(k, e, project.id, command.id, 'failed')
+    })
 
     const url = healthUrlOf(command)
     e.healthTimer = setInterval(async () => {
       if (e.status !== 'starting') return
       if (await probe(url)) {
+        // 防御性复查：await probe 期间可能已超时/停止，避免竞态把 failed 翻回 running
+        if (e.status !== 'starting') return
         this.clearTimers(e)
         this.setStatus(k, e, project.id, command.id, 'running')
       }

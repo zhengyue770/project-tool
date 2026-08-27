@@ -57,6 +57,16 @@ describe('ProcessManager 启动链路', () => {
     await waitFor(() => !alive(pid))
   })
 
+  it('workdir 不存在 → spawn error → failed 且错误入日志（无未捕获异常）', async () => {
+    const p = port()
+    const proj = mkProject(p, `node ${FIXTURE} ${p}`)
+    proj.commands[0].workdir = 'no-such-dir'
+    const m = mkManager()
+    m.start(proj, proj.commands[0])
+    await waitFor(() => m.statusOf('p1', 'c1') === 'failed')
+    expect(m.logsOf('p1', 'c1').join('\n')).toContain('[错误]')
+  })
+
   it('运行后日志保留在环形缓冲且 pid 写入 runtime', async () => {
     const p = port()
     const proj = mkProject(p, `node ${FIXTURE} ${p}`)
