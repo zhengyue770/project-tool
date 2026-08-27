@@ -8,6 +8,9 @@ import { RuntimeStore } from './store/runtimeStore'
 import { ProcessManager } from './process/manager'
 import { registerIpc } from './ipc'
 
+// spec §4.1：固定默认数据目录为 .../project-tool（Electron 默认会优先取 productName「项目启动器」）
+app.setPath('userData', join(app.getPath('appData'), 'project-tool'))
+
 let win: BrowserWindow | null = null
 
 function createWindow(): void {
@@ -28,30 +31,35 @@ app.whenReady().then(async () => {
   // spec §4.4：自定义数据目录不可访问（如外接盘未插入）
   const pointed = paths.getDataDir()
   if (pointed !== paths.defaultDir && !existsSync(pointed) && win) {
-    const pick = await dialog.showMessageBox(win, {
-      type: 'warning',
-      title: '数据目录不可访问',
-      message: `配置的数据目录当前不可访问：\n${pointed}`,
-      buttons: ['重新选择目录', '暂时用默认目录'],
-      defaultId: 0,
-      cancelId: 1
-    })
-    if (pick.response === 0) {
-      for (;;) {
-        const r = await dialog.showOpenDialog(win, {
-          properties: ['openDirectory'],
-          title: '选择包含 projects.json 的数据目录'
-        })
-        if (r.canceled || !r.filePaths[0]) { paths.setSessionDir(paths.defaultDir); break }
-        const dir = r.filePaths[0]
-        if (existsSync(join(dir, 'projects.json'))) { paths.setDataDir(dir); break }
-        await dialog.showMessageBox(win, {
-          type: 'error',
-          message: '所选目录中没有项目数据（缺少 projects.json），请重选'
-        })
+    try {
+      const pick = await dialog.showMessageBox(win, {
+        type: 'warning',
+        title: '数据目录不可访问',
+        message: `配置的数据目录当前不可访问：\n${pointed}`,
+        buttons: ['重新选择目录', '暂时用默认目录'],
+        defaultId: 0,
+        cancelId: 1
+      })
+      if (pick.response === 0) {
+        for (;;) {
+          const r = await dialog.showOpenDialog(win, {
+            properties: ['openDirectory'],
+            title: '选择包含 projects.json 的数据目录'
+          })
+          if (r.canceled || !r.filePaths[0]) { paths.setSessionDir(paths.defaultDir); break }
+          const dir = r.filePaths[0]
+          if (existsSync(join(dir, 'projects.json'))) { paths.setDataDir(dir); break }
+          await dialog.showMessageBox(win, {
+            type: 'error',
+            message: '所选目录中没有项目数据（缺少 projects.json），请重选'
+          })
+        }
+      } else {
+        paths.setSessionDir(paths.defaultDir) // 本次会话用默认目录，指针不动，之后可再切回
       }
-    } else {
-      paths.setSessionDir(paths.defaultDir) // 本次会话用默认目录，指针不动，之后可再切回
+    } catch {
+      // 窗口中途被销毁等异常：本次会话退回默认目录，保证后续装配继续
+      paths.setSessionDir(paths.defaultDir)
     }
   }
 
