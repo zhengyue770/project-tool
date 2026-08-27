@@ -1,3 +1,73 @@
+<script setup lang="ts">
+import { onMounted, onUnmounted, ref } from 'vue'
+import { ElConfigProvider } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import zhCn from 'element-plus/es/locale/lang/zh-cn'
+import type { Project, ProjectView } from '../../shared/types'
+import { api } from './api'
+import ProjectCard from './components/ProjectCard.vue'
+import ProjectEditDialog from './components/ProjectEditDialog.vue'
+import LogsDialog from './components/LogsDialog.vue'
+import SettingsDialog from './components/SettingsDialog.vue'
+
+const projects = ref<ProjectView[]>([])
+const editVisible = ref(false)
+const editTarget = ref<Project | null>(null)
+const logsVisible = ref(false)
+const logsTarget = ref<Project | null>(null)
+const settingsVisible = ref(false)
+
+let offEvents: (() => void) | null = null
+let reloadTimer: ReturnType<typeof setTimeout> | null = null
+function scheduleReload(): void {
+  if (reloadTimer) clearTimeout(reloadTimer)
+  reloadTimer = setTimeout(() => void load(), 200)
+}
+
+async function load(): Promise<void> { projects.value = await api.listProjects() }
+
+async function startAll(): Promise<void> {
+  const targets = projects.value.filter(p => p.aggStatus !== 'running' && p.aggStatus !== 'starting')
+  if (!targets.length) return
+  await Promise.allSettled(targets.map(p => api.startProject(p.id)))
+  ElMessage.success(`已发起 ${targets.length} 个项目的启动`)
+}
+
+function onDelete(p: ProjectView): void {
+  ElMessageBox.confirm(`确定删除项目「${p.name}」？运行中的命令会先停止。`, '删除项目', {
+    type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消'
+  })
+    .then(async () => { await api.deleteProject(p.id); await load() })
+    .catch(() => undefined)
+}
+
+onMounted(() => {
+  // 渲染进程可能先于主进程 registerIpc 完成，首次加载失败时延迟重试一次
+  load().catch(() => setTimeout(load, 500))
+  offEvents = api.onProjectsEvent(scheduleReload)
+})
+onUnmounted(() => offEvents?.())
+</script>
+
 <template>
-  <div style="padding: 24px; font-size: 18px">项目启动器 · 脚手架就绪</div>
+  <el-config-provider :locale="zhCn">
+    <div style="max-width: 960px; margin: 0 auto; padding: 24px">
+      <header style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px">
+        <h1 style="font-size: 20px; margin: 0">项目启动器</h1>
+        <div>
+          <el-button @click="startAll">全部启动</el-button>
+          <el-button @click="settingsVisible = true">设置</el-button>
+          <el-button type="primary" @click="editTarget = null; editVisible = true">添加项目</el-button>
+        </div>
+      </header>
+      <el-empty v-if="projects.length === 0" description="还没有项目，点右上角「添加项目」开始" />
+      <ProjectCard v-for="p in projects" :key="p.id" :project="p"
+        @edit="editTarget = $event; editVisible = true"
+        @logs="logsTarget = $event; logsVisible = true"
+        @deleted="onDelete" />
+      <ProjectEditDialog v-model="editVisible" :project="editTarget" @saved="load" />
+      <LogsDialog v-model="logsVisible" :project="logsTarget" />
+      <SettingsDialog v-model="settingsVisible" />
+    </div>
+  </el-config-provider>
 </template>
