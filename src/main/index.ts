@@ -80,7 +80,9 @@ app.whenReady().then(async () => {
 
   const manager = new ProcessManager({
     startupTimeoutMs: () => settingsStore.load().startupTimeoutMs,
-    onRuntimeChange: rf => runtimeStore.save(rf)
+    onRuntimeChange: rf => runtimeStore.save(rf),
+    // v1.1a: 子进程日志落 <userData>/logs（文件 stdio——管道会在应用退出时让子进程 EPIPE 崩溃）
+    logDir: () => join(app.getPath('userData'), 'logs')
   })
   await manager.restore(projectsFile.projects, runtimeStore.load())
 

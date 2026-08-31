@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { kill } from 'node:process'
-import { resolve } from 'node:path'
+import { join, resolve } from 'node:path'
+import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
 import type {
   CommandConfig, CommandRuntimeStatus, Project, RuntimeFile
 } from '../../shared/types'
@@ -10,6 +11,10 @@ import { healthUrlOf, probe } from './health'
 export interface ManagerOptions {
   healthIntervalMs?: number   // 默认 2000
   killGraceMs?: number        // SIGTERM→SIGKILL 宽限，默认 5000
+  /** v1.1a: 子进程日志文件目录（主进程传 <userData>/logs；测试传临时目录） */
+  logDir: () => string
+  /** v1.1a: 日志文件轮询间隔，默认 300 */
+  tailIntervalMs?: number
   startupTimeoutMs: () => number
   onRuntimeChange?: (rf: RuntimeFile) => void
 }
@@ -22,6 +27,8 @@ const MAX_LOG_LINES = 500
 const DEFAULT_PORT_RE = /(?:localhost|127\.0\.0\.1):(\d{2,5})/
 
 interface Entry {
+  /** v1.1a: 该条目对应的 runtime 键（捕获端口后回写 runtime 记录用） */
+  key: string
   status: CommandRuntimeStatus
   pid?: number
   child?: ChildProcess
@@ -31,6 +38,8 @@ interface Entry {
   flushTimer?: NodeJS.Timeout
   healthTimer?: NodeJS.Timeout
   timeoutTimer?: NodeJS.Timeout
+  /** v1.1a: 日志文件轮询定时器（纳管 clearTimers 统一清理） */
+  tailTimer?: NodeJS.Timeout
   logSubs: Set<(lines: string[]) => void>
   /** 启动代际：每次 start() 自增；旧一轮的 exit/error/定时器回调凭 gen 失效，避免污染新一轮运行 */
   gen: number
@@ -40,6 +49,10 @@ interface Entry {
   pattern?: RegExp
   /** v1.1：已捕获到的服务地址；未捕获为 null */
   discoveredUrl?: string | null
+  /** v1.1a: 子进程日志文件路径（stdio 重定向目标，亦是轮询 tail 的数据源） */
+  logFile?: string
+  /** v1.1a: 日志文件已消费的长度（字符计）——增量读取的游标，避免重复 ingest 旧字节 */
+  offset: number
 }
 
 export class ProcessManager {
@@ -65,6 +78,11 @@ export class ProcessManager {
     e.logs = []
     e.partial = ''
     e.pending = [] // 清空待刷送队列，避免已清空的日志再次推给订阅者
+    // v1.1a: 同步截断日志文件并归零游标；子进程以 O_APPEND 续写，不会留下稀疏空洞
+    if (e.logFile) {
+      try { writeFileSync(e.logFile, '') } catch { /* 文件可能不存在（未启动过），容忍 */ }
+      e.offset = 0
+    }
     this.flush(e)
   }
 
@@ -102,24 +120,36 @@ export class ProcessManager {
     e.discoveredUrl = null
 
     const cwd = resolve(project.path, command.workdir || '.')
+    // v1.1a: stdio 重定向到日志文件而非管道——管道读端随应用退出关闭，子进程下次写日志会收到 EPIPE 崩溃
+    // （违反"退出应用不杀项目进程"）。文件每次启动截断（有界）；以 'a' 打开让子进程 O_APPEND 续写，
+    // 这样 clearLogs 运行中截断后子进程从新 EOF 写起，不留稀疏空洞。父进程 spawn 后即 close 自己的 fd，
+    // 不持有任何管道/文件描述符依赖。
+    const file = this.logFileFor(k)
+    mkdirSync(this.opts.logDir(), { recursive: true })
+    writeFileSync(file, '')
+    const fd = openSync(file, 'a')
     const child = spawn(command.cmd, {
       shell: true,
       detached: true, // 新进程组（pgid === child.pid），保证整组可杀
       cwd,
       env: { ...process.env },
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['ignore', fd, fd]
     })
+    closeSync(fd)
     e.child = child
     e.pid = child.pid
     this.runtime[k] = { pid: child.pid as number, startedAt: Date.now() }
     this.emitRuntime()
-    this.append(e, `$ ${command.cmd}  (cwd: ${cwd})`)
+    this.append(e, `$ ${command.cmd}  (cwd: ${cwd})`) // 分隔行只进缓冲/订阅推送，不落文件（文件里只有子进程自身输出）
 
-    child.stdout?.on('data', (d: Buffer) => this.ingest(e, d))
-    child.stderr?.on('data', (d: Buffer) => this.ingest(e, d))
+    e.logFile = file
+    e.offset = 0
+    this.startTail(k, e, gen)
+
     child.on('exit', () => {
       // 代际守卫：旧进程退出时该 entry 可能已被新一轮 start 接管，不能动新运行的状态/timers/runtime
       if (gen !== e.gen) return
+      this.tailOnce(e) // 临终输出（如报错栈）最后一次补读，再停轮询——否则 300ms 轮询间隙里的末尾日志会丢
       this.clearTimers(e)
       const was = e.status
       e.child = undefined
@@ -134,6 +164,7 @@ export class ProcessManager {
       if (gen !== e.gen) return
       // spawn 失败（如 workdir 指向不存在的目录）：异步 error 事件，exit 可能不再触发
       this.append(e, `[错误] ${String(err)}`)
+      this.tailOnce(e) // 补读再停轮询，与 exit 路径一致
       this.clearTimers(e)
       const was = e.status
       e.child = undefined
@@ -151,8 +182,9 @@ export class ProcessManager {
       if (await probe(target)) {
         // 防御性复查：await probe 期间可能已超时/停止/被新一轮 start 取代，避免竞态把 failed 翻回 running
         if (gen !== e.gen || e.status !== 'starting') return
-        this.clearTimers(e)
+        this.clearTimers(e) // 终止健康轮询与超时定时器（tail 一并清了，下一行立即重启）
         this.setStatus(k, e, project.id, command.id, 'running')
+        this.startTail(k, e, gen) // v1.1a: 进入 running 只是停轮询/超时，日志 tail 须继续服务整个运行期
       }
     }, this.opts.healthIntervalMs ?? 2000)
 
@@ -195,11 +227,19 @@ export class ProcessManager {
         const rec = runtime[k]
         if (!rec) continue
         const live = this.alive(rec.pid)
-        if (live && (await probe(healthUrlOf(c)))) {
+        // v1.1a: 动态命令端口为 0，healthUrlOf 必探不通——改探 runtime 记录里持久化的 discoveredUrl；
+        // 记录缺失（旧版 runtime.json）则无法验证真实端口，按 stopped 丢弃，宁错杀不误杀
+        const target = c.portMode === 'dynamic' ? rec.discoveredUrl : healthUrlOf(c)
+        if (live && target && (await probe(target))) {
           const e = this.entry(k)
           e.status = 'running'
           e.pid = rec.pid
+          if (c.portMode === 'dynamic') {
+            e.dynamic = true
+            e.discoveredUrl = rec.discoveredUrl // 卡片显示真实端口
+          }
           this.runtime[k] = rec
+          this.adoptLogTail(k, e) // 采用后从文件末尾续读日志，重开后日志面板继续有输出
         }
       }
     }
@@ -211,7 +251,7 @@ export class ProcessManager {
   private entry(k: string): Entry {
     let e = this.entries.get(k)
     if (!e) {
-      e = { status: 'stopped', logs: [], partial: '', pending: [], logSubs: new Set(), gen: 0, dynamic: false }
+      e = { status: 'stopped', key: k, logs: [], partial: '', pending: [], logSubs: new Set(), gen: 0, dynamic: false, offset: 0 }
       this.entries.set(k, e)
     }
     return e
@@ -225,7 +265,8 @@ export class ProcessManager {
   private clearTimers(e: Entry): void {
     if (e.healthTimer) clearInterval(e.healthTimer)
     if (e.timeoutTimer) clearTimeout(e.timeoutTimer)
-    e.healthTimer = e.timeoutTimer = undefined
+    if (e.tailTimer) clearInterval(e.tailTimer)
+    e.healthTimer = e.timeoutTimer = e.tailTimer = undefined
   }
 
   private emitRuntime(): void { this.opts.onRuntimeChange?.({ ...this.runtime }) }
@@ -235,6 +276,47 @@ export class ProcessManager {
     const lines = e.partial.split('\n')
     e.partial = lines.pop() ?? ''
     for (const l of lines) this.append(e, l)
+  }
+
+  // ---- v1.1a 日志文件轮询 tail ----
+
+  /** 日志文件路径：<logDir>/<projectId>__<commandId>.log（键中 ':' 换 '__' 以适配文件名） */
+  private logFileFor(k: string): string {
+    return join(this.opts.logDir(), `${k.replace(/:/g, '__')}.log`)
+  }
+
+  /** 启动轮询：从 offset 起增量读日志文件进既有 ingest 管道（partial/append/flush/maybeCapturePort 零改动） */
+  private startTail(k: string, e: Entry, gen: number): void {
+    if (e.tailTimer) clearInterval(e.tailTimer) // 防御：理论上 clearTimers 已清
+    e.tailTimer = setInterval(() => {
+      // 代际守卫：旧一轮的轮询在新 start 接管后自灭（正常路径由 clearTimers 清除，此为兜底）
+      if (gen !== e.gen) { this.clearTimers(e); return }
+      this.tailOnce(e)
+    }, this.opts.tailIntervalMs ?? 300)
+  }
+
+  /** 单次增量读取：全量读入后按 offset 切片（文件每次启动截断、有界，全量读代价可接受），推进游标 */
+  private tailOnce(e: Entry): void {
+    if (!e.logFile) return
+    let text: string
+    try {
+      text = readFileSync(e.logFile, 'utf8')
+    } catch {
+      return // 文件被外部删除/暂不可读：本轮跳过（restore 场景允许文件不存在）
+    }
+    if (text.length <= e.offset) return // 无新增（或被截短：游标保持，等 O_APPEND 新内容追上）
+    const chunk = text.slice(e.offset)
+    e.offset = text.length
+    this.ingest(e, Buffer.from(chunk, 'utf8'))
+  }
+
+  /** restore 采用后接管日志：以当前文件末尾为起点续读（旧内容不重放，只收新输出）；文件不存在则从 0 起且容忍 */
+  private adoptLogTail(k: string, e: Entry): void {
+    const file = this.logFileFor(k)
+    e.logFile = file
+    e.offset = 0
+    try { e.offset = readFileSync(file, 'utf8').length } catch { /* 无历史日志文件则从 0 开始 */ }
+    this.startTail(k, e, e.gen)
   }
 
   private append(e: Entry, line: string): void {
@@ -267,6 +349,9 @@ export class ProcessManager {
     e.discoveredUrl = `http://127.0.0.1:${port}`
     const line = `[自动发现] 服务地址 ${e.discoveredUrl}`
     e.logs.push(line); e.pending.push(line)
+    // v1.1a: 捕获即持久化进 runtime 记录——应用退出后 runtime.json 是唯一能还原真实端口的载体
+    const rec = this.runtime[e.key]
+    if (rec) { rec.discoveredUrl = e.discoveredUrl; this.emitRuntime() }
   }
 
   private flush(e: Entry): void {

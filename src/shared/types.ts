@@ -32,7 +32,12 @@ export interface ProjectsFile { version: number; projects: Project[] }
 export interface AppSettings { startupTimeoutMs: number; autoLaunch: boolean }
 
 // ---- 运行时（runtime.json，key = `${projectId}:${commandId}`）----
-export interface RuntimeRecord { pid: number; startedAt: number }
+export interface RuntimeRecord {
+  pid: number
+  startedAt: number
+  /** v1.1a: 动态端口模式捕获到的服务地址（如 http://127.0.0.1:5173）；应用重启后 restore 凭它探测真实端口。仅动态模式有值 */
+  discoveredUrl?: string
+}
 export type RuntimeFile = Record<string, RuntimeRecord>
 
 export function runtimeKey(projectId: string, commandId: string): string {
