@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { CaretRight, Delete, EditPen, Document, Link, SwitchButton } from '@element-plus/icons-vue'
+import { computed } from 'vue'
 import type { CommandConfig, CommandRuntimeStatus, ProjectView } from '../../../shared/types'
 import { api } from '../api'
 import AccountsPopover from './AccountsPopover.vue'
@@ -24,6 +25,8 @@ const CMD_META: Record<CommandRuntimeStatus, { label: string; color: string }> =
   failed: { label: '失败', color: '#f56c6c' },
   stopped: { label: '已停止', color: '#909399' }
 }
+/** v1.1c：单命令项目唯一命令的便捷引用（多命令仍走 v-for 行） */
+const only = computed(() => props.project.commands[0])
 function st(id: string): CommandRuntimeStatus { return props.project.commandStates[id] ?? 'stopped' }
 /** v1.1：动态模式显示实际捕获的端口（未捕获时省略号），固定模式沿用配置端口 */
 function portLabel(c: CommandConfig): string {
@@ -45,7 +48,7 @@ function portLabel(c: CommandConfig): string {
     </div>
     <div style="color: #909399; font-size: 12px; margin: 4px 0 10px">{{ project.path }}</div>
 
-    <div v-for="c in project.commands" :key="c.id"
+    <div v-if="project.commands.length > 1" v-for="c in project.commands" :key="c.id"
       style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px">
       <span :style="{ background: CMD_META[st(c.id)].color, width: '8px', height: '8px', borderRadius: '4px' }" />
       <span style="min-width: 60px">{{ c.name }}</span>
@@ -55,6 +58,13 @@ function portLabel(c: CommandConfig): string {
         @click="api.startProject(project.id, c.id)">启动</el-button>
       <el-button v-else link type="danger" size="small"
         @click="api.stopProject(project.id, c.id)">停止</el-button>
+    </div>
+    <!-- v1.1c：单命令项目折叠为一条紧凑信息行，控制统一由卡片级启停按钮承担 -->
+    <div v-else class="cmd row" style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+      <span :style="{ background: CMD_META[st(only.id)].color, width: '8px', height: '8px', borderRadius: '4px' }" />
+      <span style="min-width: 60px">{{ only.name }}</span>
+      <span style="color: #909399">{{ portLabel(only) }}</span>
+      <span :style="{ color: CMD_META[st(only.id)].color }">{{ CMD_META[st(only.id)].label }}</span>
     </div>
 
     <div style="display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center">
