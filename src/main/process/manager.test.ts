@@ -265,4 +265,41 @@ describe('ProcessManager 动态端口', () => {
     await waitFor(() => b.logsOf('p1', 'c1').some(l => l.includes('heartbeat')))
     await b.stop('p1', 'c1')
   })
+
+  it('restore 采用后从文件头播种历史日志（原始行无时间前缀）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pt-log-'))
+    const proj = mkProject(0, `node ${FIXTURE} auto`, { portMode: 'dynamic' })
+    let saved: RuntimeFile | undefined
+    const a = mkManager({ logDir: () => dir, onRuntimeChange: rf => (saved = rf) })
+    a.start(proj, proj.commands[0])
+    await waitFor(() => a.statusOf('p1', 'c1') === 'running')
+    // 换代前先等历史行（启动头行已同步落文件；端口行/孙进程行经 tail 进缓冲）确已产生
+    await waitFor(() => {
+      const logs = a.logsOf('p1', 'c1')
+      return logs.some(l => l.includes('Local:')) && logs.some(l => l.includes('GRANDCHILD_PID'))
+    })
+    // 宿主换代但沿用同一日志目录：B 采用后缓冲由文件头播种，日志面板重开即见本次运行从头开始的日志
+    const b = mkManager({ logDir: () => dir })
+    await b.restore([proj], { 'p1:c1': saved!['p1:c1']! })
+    expect(b.statusOf('p1', 'c1')).toBe('running')
+    const logs = b.logsOf('p1', 'c1')
+    expect(logs.some(l => l.startsWith('$ '))).toBe(true) // 会话头行也在（v1.1b 启动写入文件）
+    expect(logs.some(l => l.includes('Local:'))).toBe(true) // 历史播种：核心断言
+    expect(logs.some(l => l.includes('GRANDCHILD_PID'))).toBe(true)
+    // 播种行保留文件原样，不带 [时间] 前缀（与恢复后新行的时间前缀天然区分）
+    expect(logs.some(l => l.includes('Local:') && !l.startsWith('['))).toBe(true)
+    await b.stop('p1', 'c1')
+  })
+
+  it('启动头行写入日志文件', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pt-log-'))
+    const p = port()
+    const proj = mkProject(p, `node ${FIXTURE} ${p}`)
+    const m = mkManager({ logDir: () => dir })
+    m.start(proj, proj.commands[0])
+    await waitFor(() => m.statusOf('p1', 'c1') === 'running')
+    // 头行随启动截断一并落文件（v1.1b）：应用重开 restore 播种时它也在最前
+    const text = readFileSync(join(dir, 'p1__c1.log'), 'utf8')
+    expect(text.split('\n').some(l => l.startsWith('$ '))).toBe(true)
+  })
 })

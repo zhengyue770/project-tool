@@ -126,7 +126,9 @@ export class ProcessManager {
     // 不持有任何管道/文件描述符依赖。
     const file = this.logFileFor(k)
     mkdirSync(this.opts.logDir(), { recursive: true })
-    writeFileSync(file, '')
+    // v1.1b: 会话头行随截断一并写入文件本身（文件里带时间后缀）——应用重开 restore 从文件头播种时它也在最前
+    const header = `$ ${command.cmd}  (cwd: ${cwd}) @ ${new Date().toLocaleString()}\n`
+    writeFileSync(file, header)
     const fd = openSync(file, 'a')
     const child = spawn(command.cmd, {
       shell: true,
@@ -140,10 +142,10 @@ export class ProcessManager {
     e.pid = child.pid
     this.runtime[k] = { pid: child.pid as number, startedAt: Date.now() }
     this.emitRuntime()
-    this.append(e, `$ ${command.cmd}  (cwd: ${cwd})`) // 分隔行只进缓冲/订阅推送，不落文件（文件里只有子进程自身输出）
+    this.append(e, `$ ${command.cmd}  (cwd: ${cwd})`) // 头行进缓冲/订阅推送（带时间前缀）；文件里的一份由上方 writeFileSync 落盘
 
     e.logFile = file
-    e.offset = 0
+    e.offset = header.length // tail 从文件头行之后起读——头行已在缓冲里，避免再经 ingest 重复入缓冲
     this.startTail(k, e, gen)
 
     child.on('exit', () => {
@@ -239,7 +241,7 @@ export class ProcessManager {
             e.discoveredUrl = rec.discoveredUrl // 卡片显示真实端口
           }
           this.runtime[k] = rec
-          this.adoptLogTail(k, e) // 采用后从文件末尾续读日志，重开后日志面板继续有输出
+          this.adoptLogTail(k, e) // v1.1b: 采用后从文件头播种日志缓冲并续读增量，重开后日志面板可见本次运行从头开始的日志
         }
       }
     }
@@ -310,12 +312,20 @@ export class ProcessManager {
     this.ingest(e, Buffer.from(chunk, 'utf8'))
   }
 
-  /** restore 采用后接管日志：以当前文件末尾为起点续读（旧内容不重放，只收新输出）；文件不存在则从 0 起且容忍 */
+  /** v1.1b: restore 采用后接管日志：缓冲由文件头播种（最近 MAX_LOG_LINES 行原始行，不加时间前缀，与恢复后新行的 [时间] 前缀天然区分），
+   *  游标落到文件末尾续读增量；文件不存在则缓冲空、从 0 起且容忍。
+   *  播种不经过 ingest/append/maybeCapturePort——discoveredUrl 已由 runtime 记录恢复，不得再触发捕获；也不产生 pending 推送 */
   private adoptLogTail(k: string, e: Entry): void {
     const file = this.logFileFor(k)
     e.logFile = file
-    e.offset = 0
-    try { e.offset = readFileSync(file, 'utf8').length } catch { /* 无历史日志文件则从 0 开始 */ }
+    try {
+      const text = readFileSync(file, 'utf8')
+      e.logs = text.split('\n').filter(l => l !== '').slice(-MAX_LOG_LINES)
+      e.offset = text.length // 与 tailOnce 的字符计游标保持一致
+    } catch {
+      e.logs = []
+      e.offset = 0
+    }
     this.startTail(k, e, e.gen)
   }
 
