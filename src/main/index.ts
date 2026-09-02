@@ -7,9 +7,14 @@ import { SettingsStore } from './store/settingsStore'
 import { RuntimeStore } from './store/runtimeStore'
 import { ProcessManager } from './process/manager'
 import { registerIpc } from './ipc'
+import { augmentPathFromLoginShell } from './env'
 
 // spec §4.1：固定默认数据目录为 .../project-tool（Electron 默认会优先取 productName「项目启动器」）
 app.setPath('userData', join(app.getPath('appData'), 'project-tool'))
+
+// v1.1f：GUI 启动的打包应用不继承终端环境，PATH 缺用户目录（npm/nvm 不可见），
+// 任何 spawn 之前先从登录 shell 合并用户 PATH；dev 模式重复合并无害
+augmentPathFromLoginShell()
 
 let win: BrowserWindow | null = null
 
