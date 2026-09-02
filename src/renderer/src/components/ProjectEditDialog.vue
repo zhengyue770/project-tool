@@ -135,7 +135,7 @@ async function save(): Promise<void> {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="project ? '编辑项目' : '添加项目'" width="760px" top="5vh">
+  <el-dialog v-model="visible" :title="project ? '编辑项目' : '添加项目'" width="880px" top="5vh">
     <el-form label-width="90px">
       <el-form-item label="项目名称" required>
         <el-input v-model="f.name" placeholder="默认取文件夹名" @input="f.nameTouched = true" />
@@ -149,25 +149,22 @@ async function save(): Promise<void> {
 
       <el-form-item label="启动命令" required>
         <div style="width: 100%">
-          <div v-for="(c, i) in f.commands" :key="c.id" style="margin-bottom: 8px">
-            <div style="display: flex; gap: 6px">
-              <el-input v-model="c.name" placeholder="名称" style="width: 100px" />
-              <el-input v-model="c.cmd" placeholder="命令，如 npm run dev" />
-              <el-input v-model="c.workdir" placeholder="子目录(可选)" style="width: 110px" />
-              <el-select v-model="c.portMode" style="width: 88px">
+          <div v-for="(c, i) in f.commands" :key="c.id">
+            <!-- 第一行：执行相关（名称 + 命令 + 删除） -->
+            <div style="display: flex; gap: 8px; margin-bottom: 8px">
+              <el-input v-model="c.name" placeholder="名称，如 前端" style="width: 150px" />
+              <el-input v-model="c.cmd" placeholder="启动命令，如 npm run dev" style="flex: 1; min-width: 260px" />
+              <el-button :icon="Delete" circle @click="f.commands.splice(i, 1)" />
+            </div>
+            <!-- 第二行：目录与端口检测，缩进 0，全宽 -->
+            <div style="display: flex; gap: 8px; margin-bottom: 10px">
+              <el-input v-model="c.workdir" placeholder="子目录，默认项目根目录" style="width: 200px" />
+              <el-select v-model="c.portMode" style="width: 130px">
                 <el-option label="固定端口" value="fixed" />
                 <el-option label="动态获取" value="dynamic" />
               </el-select>
-              <el-button :icon="Delete" circle @click="f.commands.splice(i, 1)" />
-            </div>
-            <!-- 第二行与第一行名称左缘对齐 -->
-            <div style="display: flex; gap: 6px; align-items: center; margin-top: 4px">
-              <template v-if="(c.portMode ?? 'fixed') === 'dynamic'">
-                <el-input v-model="c.successPattern"
-                  placeholder="可选：捕获端口的正则，留空用内置规则" />
-                <span style="color: #909399; font-size: 12px; white-space: nowrap">从启动日志识别真实端口</span>
-              </template>
-              <el-input v-else v-model="c.port" placeholder="端口" type="number" style="width: 140px" />
+              <el-input v-if="(c.portMode ?? 'fixed') !== 'dynamic'" v-model="c.port" placeholder="端口号" type="number" style="width: 150px" />
+              <el-input v-else v-model="c.successPattern" placeholder="捕获正则（可选，留空自动识别）" style="flex: 1; min-width: 220px" />
             </div>
           </div>
           <el-button :icon="Plus" size="small"
@@ -178,8 +175,8 @@ async function save(): Promise<void> {
       <el-form-item label="页面地址">
         <div style="width: 100%">
           <div v-for="(u, i) in f.urls" :key="u.id" style="display: flex; gap: 6px; margin-bottom: 6px">
-            <el-input v-model="u.name" placeholder="名称" style="width: 140px" />
-            <el-input v-model="u.url" placeholder="http://localhost:8080" />
+            <el-input v-model="u.name" placeholder="名称" style="width: 180px" />
+            <el-input v-model="u.url" placeholder="http://localhost:8080" style="flex: 1; min-width: 260px" />
             <el-button :icon="Delete" circle @click="f.urls.splice(i, 1)" />
           </div>
           <el-button :icon="Plus" size="small" @click="f.urls.push({ id: uid(), name: '', url: '' })">添加地址</el-button>
@@ -188,11 +185,11 @@ async function save(): Promise<void> {
 
       <el-form-item label="账号">
         <div style="width: 100%">
-          <div v-for="(a, i) in f.accounts" :key="a.id" style="display: flex; gap: 6px; margin-bottom: 6px">
-            <el-input v-model="a.label" placeholder="标签" style="width: 90px" />
-            <el-input v-model="a.username" placeholder="用户名" />
-            <el-input v-model="a.password" placeholder="密码" show-password />
-            <el-input v-model="a.role" placeholder="角色" style="width: 100px" />
+          <div v-for="(a, i) in f.accounts" :key="a.id" style="display: flex; gap: 8px; margin-bottom: 8px">
+            <el-input v-model="a.label" placeholder="标签，如 管理员" style="width: 150px" />
+            <el-input v-model="a.username" placeholder="用户名" style="flex: 1; min-width: 200px" />
+            <el-input v-model="a.password" placeholder="密码" show-password style="flex: 1; min-width: 200px" />
+            <el-input v-model="a.role" placeholder="角色" style="width: 150px" />
             <el-button :icon="Delete" circle @click="f.accounts.splice(i, 1)" />
           </div>
           <el-button :icon="Plus" size="small" @click="f.accounts.push({ id: uid(), label: '', username: '', password: '', role: '' })">添加账号</el-button>
