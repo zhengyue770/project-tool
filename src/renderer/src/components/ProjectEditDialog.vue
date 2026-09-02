@@ -149,6 +149,13 @@ async function save(): Promise<void> {
 
       <el-form-item label="启动命令" required>
         <div style="width: 100%">
+          <div class="section-help">
+            <p>一条命令对应一个要启动的服务：前后端分离的项目可点「添加命令」配多条（如一条后端 + 一条前端），</p>
+            <p>项目「启动」会全部拉起，并分别显示各自状态。</p>
+            <p>子目录：命令在项目文件夹内的哪个文件夹执行，"." 表示项目根目录本身；只有 monorepo 等需要在子文件夹里跑时才需要改。</p>
+            <p>固定端口：填命令实际监听的端口（如 vite 默认 5173），用于判定启动成功；</p>
+            <p>动态获取：端口会变的项目（被占自动换端口）选它，将从启动日志自动识别真实端口。</p>
+          </div>
           <div v-for="(c, i) in f.commands" :key="c.id">
             <!-- 第一行：执行相关（名称 + 命令 + 删除） -->
             <div style="display: flex; gap: 8px; margin-bottom: 8px">
@@ -202,3 +209,17 @@ async function save(): Promise<void> {
     </template>
   </el-dialog>
 </template>
+
+<style scoped>
+.section-help {
+  width: 100%;
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  background: var(--el-fill-color-light);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--el-text-color-secondary);
+}
+.section-help p { margin: 0; }
+</style>
