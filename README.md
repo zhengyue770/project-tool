@@ -22,8 +22,8 @@
 从 [Releases](https://github.com/zhengyue770/project-tool/releases) 下载 `.dmg`，打开后把应用拖入"应用程序"文件夹即可。
 
 - 平台：macOS，按机器选择下载：
-  - Intel Mac：不带后缀的 `项目启动器-x.x.x.dmg`
-  - Apple Silicon（M1/M2/M3/M4）：带 `-arm64` 后缀的 `项目启动器-x.x.x-arm64.dmg`
+  - Intel Mac：`project-tool-x.x.x-x64.dmg`
+  - Apple Silicon（M1/M2/M3/M4）：`project-tool-x.x.x-arm64.dmg`
 - 应用未签名，**首次打开请右键 → 打开**（或在系统设置中允许）
 
 ## 快速上手

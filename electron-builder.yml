@@ -1,5 +1,6 @@
 appId: com.zhengyue.projecttool
 productName: 项目启动器
+artifactName: project-tool-${version}-${arch}.${ext}
 directories:
   output: release
 files:
