@@ -14,7 +14,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "test": "vitest run",
-    "build:mac": "electron-vite build && electron-builder --mac"
+    "build:mac": "bash scripts/package-mac.sh"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",
