@@ -22,11 +22,10 @@ for dir in mac mac-arm64; do
   echo "  ✓ $dir 签名校验通过"
 done
 
-echo "== 4/4 生成 dmg / zip =="
-hdiutil create -volname "$NAME" -srcfolder "release/mac/$NAME.app" -ov -format UDZO "release/$NAME-$VERSION.dmg" >/dev/null
-hdiutil create -volname "$NAME" -srcfolder "release/mac-arm64/$NAME.app" -ov -format UDZO "release/$NAME-$VERSION-arm64.dmg" >/dev/null
-ditto -c -k --keepParent "release/mac/$NAME.app" "release/$NAME-$VERSION-mac.zip"
-ditto -c -k --keepParent "release/mac-arm64/$NAME.app" "release/$NAME-$VERSION-arm64-mac.zip"
+echo "== 4/4 生成 dmg / zip（带拖入安装窗口）=="
+# --prepackaged：基于上面已签名的裸应用生成安装器，不会重新打包/破坏签名
+npx electron-builder --mac dmg zip --x64 --prepackaged "release/mac" >/dev/null
+npx electron-builder --mac dmg zip --arm64 --prepackaged "release/mac-arm64" >/dev/null
 rm -f release/*.blockmap release/latest-mac.yml
 
 echo "打包完成："
