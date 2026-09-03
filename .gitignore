@@ -3,3 +3,4 @@ out/
 release/
 *.log
 .DS_Store
+docs/superpowers/
