@@ -21,7 +21,7 @@
 
 从 [Releases](https://github.com/zhengyue770/project-tool/releases) 下载最新的 `.dmg`，拖入"应用程序"即可。
 
-- 平台：macOS（当前构建为 Intel x64，Apple Silicon 可通过 Rosetta 运行）
+- 平台：macOS，提供 Intel（x64）与 Apple Silicon（arm64）两种构建，按自己机器选择
 - 应用未签名，**首次打开请右键 → 打开**（或在系统设置中允许）
 
 ## 快速上手
