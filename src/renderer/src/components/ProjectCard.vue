@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { CaretRight, Delete, EditPen, Document, Link, SwitchButton } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import { computed } from 'vue'
-import type { CommandConfig, CommandRuntimeStatus, ProjectView } from '../../../shared/types'
+import type { CommandConfig, CommandRuntimeStatus, ProjectView, UrlConfig } from '../../../shared/types'
+import { resolveUrl } from '../../../shared/urlTemplate'
 import { api } from '../api'
 import AccountsPopover from './AccountsPopover.vue'
 
@@ -35,6 +37,13 @@ function portLabel(c: CommandConfig): string {
     return p ? `:${p}` : ':…'
   }
   return `:${c.port}`
+}
+
+/** v1.2：点击时把 {{port}} / {{port:命令名}} 实时解析为实际端口（联动动态端口）再打开 */
+function openUrl(u: UrlConfig): void {
+  const r = resolveUrl(u.url, props.project)
+  if ('error' in r) { ElMessage.warning(r.error); return }
+  void api.openExternal(r.url)
 }
 </script>
 
@@ -73,7 +82,7 @@ function portLabel(c: CommandConfig): string {
       <el-button v-else type="danger" plain :icon="SwitchButton"
         @click="api.stopProject(project.id)">停止</el-button>
       <el-button v-for="u in project.urls" :key="u.id" :icon="Link"
-        @click="api.openExternal(u.url)">{{ u.name }}</el-button>
+        @click="openUrl(u)">{{ u.name }}</el-button>
       <AccountsPopover :accounts="project.accounts" />
       <el-button :icon="Document" @click="$emit('logs', project)">日志</el-button>
       <el-button :icon="EditPen" @click="$emit('edit', project)">编辑</el-button>

@@ -3,6 +3,7 @@ import { reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { FolderOpened, Plus, Delete } from '@element-plus/icons-vue'
 import type { Project } from '../../../shared/types'
+import { portPlaceholderNames } from '../../../shared/urlTemplate'
 import { api } from '../api'
 
 const props = defineProps<{ modelValue: boolean; project: Project | null }>()
@@ -82,6 +83,8 @@ function validate(): string | null {
     }
   }
   for (const u of f.urls) {
+    // v1.2：含端口占位符（{{port}} / {{port:命令名}}）的地址不做 http(s) 前缀强制，其余仍走原校验
+    if (u.url.includes('{{port')) continue
     if (!/^https?:\/\/.+/.test(u.url)) return `页面地址「${u.name || u.url}」需以 http:// 或 https:// 开头`
   }
   for (const a of f.accounts) {
@@ -100,6 +103,12 @@ async function save(): Promise<void> {
     const p = Number(c.port)
     if (seen.has(p)) { ElMessage.warning(`多个命令使用端口 ${p}，可能互相冲突`); break }
     seen.add(p)
+  }
+  // v1.2：地址引用了不存在的命令名时提示警告（允许保存，点击该地址时才真正报错）；对齐重复端口警告的行为
+  const cmdNames = new Set(f.commands.map(c => c.name.trim()))
+  for (const u of f.urls) {
+    const missing = portPlaceholderNames(u.url).find(n => !cmdNames.has(n))
+    if (missing !== undefined) { ElMessage.warning(`页面地址引用了不存在的命令「${missing}」`); break }
   }
   const project: Project = {
     id: f.id,
@@ -181,9 +190,11 @@ async function save(): Promise<void> {
 
       <el-form-item label="页面地址">
         <div style="width: 100%">
+          <!-- v-pre：提示文案中的 {{port}} 是字面占位符，跳过 Vue 插值编译 -->
+          <div class="section-help tight" v-pre>地址中的 {{port}} 会替换为命令的实际端口（多命令用 {{port:命令名}}），适配动态端口项目。</div>
           <div v-for="(u, i) in f.urls" :key="u.id" style="display: flex; gap: 6px; margin-bottom: 6px">
             <el-input v-model="u.name" placeholder="名称" style="width: 180px" />
-            <el-input v-model="u.url" placeholder="http://localhost:8080" style="flex: 1; min-width: 260px" />
+            <el-input v-model="u.url" placeholder="http://localhost:{{port}} 或完整地址" style="flex: 1; min-width: 260px" />
             <el-button :icon="Delete" circle @click="f.urls.splice(i, 1)" />
           </div>
           <el-button :icon="Plus" size="small" @click="f.urls.push({ id: uid(), name: '', url: '' })">添加地址</el-button>
@@ -223,4 +234,5 @@ async function save(): Promise<void> {
   color: var(--el-text-color-secondary);
 }
 .section-help p { margin: 0; }
+.section-help.tight { margin-bottom: 6px; padding: 6px 12px; }
 </style>
