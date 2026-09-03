@@ -212,6 +212,7 @@ async function save(): Promise<void> {
 
 <style scoped>
 .section-help {
+  box-sizing: border-box;
   width: 100%;
   margin-bottom: 10px;
   padding: 8px 12px;
