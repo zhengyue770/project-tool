@@ -6,7 +6,7 @@ import type {
   CommandConfig, CommandRuntimeStatus, Project, RuntimeFile
 } from '../../shared/types'
 import { runtimeKey } from '../../shared/types'
-import { healthUrlOf, probe } from './health'
+import { probe, probePort, portFromUrl } from './health'
 
 export interface ManagerOptions {
   healthIntervalMs?: number   // 默认 2000
@@ -94,9 +94,7 @@ export class ProcessManager {
 
   discoveredPortOf(projectId: string, commandId: string): number | null {
     const url = this.entries.get(runtimeKey(projectId, commandId))?.discoveredUrl
-    if (!url) return null
-    const m = /(\d+)$/.exec(url) // 只从尾部取端口，避免 URL 解析对边缘地址报错
-    return m ? Number(m[1]) : null
+    return url ? portFromUrl(url) : null // 复用 health.portFromUrl（尾部数字即端口）
   }
 
   start(project: Project, command: CommandConfig): void {
@@ -176,12 +174,21 @@ export class ProcessManager {
       if (was === 'starting' || was === 'running') this.setStatus(k, e, project.id, command.id, 'failed')
     })
 
-    const url = healthUrlOf(command) // 固定模式探测地址原样；动态模式下忽略 healthCheckUrl
+    // v1.1g 探测目标：固定模式用户显式给了地址按原样探；其余双栈探测端口——vite 等默认绑 localhost，
+    // 部分机器 localhost 只落 ::1，写死 127.0.0.1 会误报启动失败
+    const probeTarget = (): Promise<boolean> => {
+      const custom = command.healthCheckUrl?.trim()
+      if (!e.dynamic && custom) return probe(custom)
+      if (e.dynamic) {
+        const p = e.discoveredUrl ? portFromUrl(e.discoveredUrl) : null
+        return p ? probePort(p) : Promise.resolve(false)
+      }
+      return probePort(command.port) // 固定模式无自定义地址
+    }
     e.healthTimer = setInterval(async () => {
       if (gen !== e.gen || e.status !== 'starting') return
       if (e.dynamic && !e.discoveredUrl) return // 动态模式未捕获前不发请求
-      const target = e.discoveredUrl ?? url
-      if (await probe(target)) {
+      if (await probeTarget()) {
         // 防御性复查：await probe 期间可能已超时/停止/被新一轮 start 取代，避免竞态把 failed 翻回 running
         if (gen !== e.gen || e.status !== 'starting') return
         this.clearTimers(e) // 终止健康轮询与超时定时器（tail 一并清了，下一行立即重启）
@@ -229,10 +236,18 @@ export class ProcessManager {
         const rec = runtime[k]
         if (!rec) continue
         const live = this.alive(rec.pid)
-        // v1.1a: 动态命令端口为 0，healthUrlOf 必探不通——改探 runtime 记录里持久化的 discoveredUrl；
+        // v1.1a: 动态命令端口为 0，固定地址必探不通——改探 runtime 记录里持久化的 discoveredUrl；
         // 记录缺失（旧版 runtime.json）则无法验证真实端口，按 stopped 丢弃，宁错杀不误杀
-        const target = c.portMode === 'dynamic' ? rec.discoveredUrl : healthUrlOf(c)
-        if (live && target && (await probe(target))) {
+        // v1.1g: 探测双栈化（127.0.0.1 与 [::1]）——恢复与启动同一套语义，dev server 可能只绑 IPv6 回环
+        const check = (): Promise<boolean> => {
+          if (c.portMode === 'dynamic') {
+            const p = rec.discoveredUrl ? portFromUrl(rec.discoveredUrl) : null
+            return p ? probePort(p) : Promise.resolve(false) // 缺 discoveredUrl：探不通即丢弃记录
+          }
+          const custom = c.healthCheckUrl?.trim()
+          return custom ? probe(custom) : probePort(c.port)
+        }
+        if (live && (await check())) {
           const e = this.entry(k)
           e.status = 'running'
           e.pid = rec.pid

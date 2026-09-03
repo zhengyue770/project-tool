@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import http from 'node:http'
-import { healthUrlOf, probe } from './health'
+import { healthUrlOf, probe, probePort, portFromUrl } from './health'
 
 let server: http.Server
 let port = 0
@@ -31,4 +31,32 @@ describe('probe', () => {
     expect(await probe(`http://127.0.0.1:${p}`, 300)).toBe(false)
     silent.close()
   })
+})
+
+describe('probePort（双栈）', () => {
+  it('服务仅绑 ::1 时仍探测成功（复现 bug 场景）', async () => {
+    const s6 = http.createServer((_q, res) => res.end('ok'))
+    await new Promise<void>(r => s6.listen(0, '::1', () => r()))
+    const p = (s6.address() as { port: number }).port
+    expect(await probe(`http://127.0.0.1:${p}`, 500)).toBe(false) // 记录 IPv4 侧确实不通（bug 证据）
+    expect(await probePort(p)).toBe(true)                          // 双栈探测成功
+    s6.close()
+  })
+  it('服务绑 127.0.0.1 时成功', async () => {
+    const s4 = http.createServer((_q, res) => res.end('ok'))
+    await new Promise<void>(r => s4.listen(0, '127.0.0.1', () => r()))
+    const p = (s4.address() as { port: number }).port
+    expect(await probePort(p)).toBe(true)
+    s4.close()
+  })
+  it('无服务端口为 false', async () => expect(await probePort(59998, 300)).toBe(false))
+})
+
+describe('portFromUrl', () => {
+  it('从 URL 尾部解析端口', () =>
+    expect(portFromUrl('http://127.0.0.1:3000')).toBe(3000))
+  it('无端口返回 null', () =>
+    expect(portFromUrl('http://example.com/')).toBeNull())
+  it('空串返回 null', () =>
+    expect(portFromUrl('')).toBeNull())
 })
