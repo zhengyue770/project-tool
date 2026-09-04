@@ -21,7 +21,11 @@ function mkProject(p: number, cmd: string, over?: Partial<CommandConfig>): Proje
 function alive(pid: number): boolean { try { kill(pid, 0); return true } catch { return false } }
 
 const managers: ProcessManager[] = []
-afterEach(() => { for (const m of managers.splice(0)) void m.stopProjectForTest() })
+// P1 修复：清理必须被 await——void 触发的异步停止与下一个用例并发，
+// 残留进程/定时器会互相干扰并让用例窗口收不住
+afterEach(async () => {
+  await Promise.all(managers.splice(0).map(m => m.stopProjectForTest()))
+})
 
 function mkManager(over: Partial<ConstructorParameters<typeof ProcessManager>[0]> = {}): ProcessManager {
   // v1.1a：日志文件化——每个 manager 独立临时日志目录（模拟各自的 userData/logs）
@@ -301,5 +305,92 @@ describe('ProcessManager 动态端口', () => {
     // 头行随启动截断一并落文件（v1.1b）：应用重开 restore 播种时它也在最前
     const text = readFileSync(join(dir, 'p1__c1.log'), 'utf8')
     expect(text.split('\n').some(l => l.startsWith('$ '))).toBe(true)
+  })
+})
+
+// 快捷命令任务模式（spec 2026-09-04-quick-commands §5）：
+// spawn 即 running（无 starting/端口探测/超时）；退出码 0→stopped、非 0→failed；
+// stop 杀整组；restore 只查 pid 存活即恢复 running 并接管日志。
+describe('ProcessManager 快捷命令（任务模式）', () => {
+  function mkQuickProject(cmd: string): Project {
+    return {
+      id: 'p1', name: 't', path: process.cwd(),
+      commands: [{ id: 'c1', name: 'srv', cmd: 'true', workdir: '.', port: 1 }],
+      urls: [], accounts: [], createdAt: 0,
+      quickCommands: [{ id: 'q1', name: 'task', cmd, source: 'manual' }]
+    }
+  }
+
+  it('spawn 即 running；退出码 0 → stopped，stdout 进日志', async () => {
+    const proj = mkQuickProject('node -e "console.log(42); process.exit(0)"')
+    const m = mkManager()
+    m.runTask(proj, proj.quickCommands![0])
+    expect(m.statusOf('p1', 'q1')).toBe('running') // 无 starting 中间态
+    await waitFor(() => m.statusOf('p1', 'q1') === 'stopped')
+    expect(m.logsOf('p1', 'q1').join('\n')).toContain('42')
+  })
+
+  it('退出码非 0 → failed 并补退出码日志行', async () => {
+    const proj = mkQuickProject('node -e "process.exit(3)"')
+    const m = mkManager()
+    m.runTask(proj, proj.quickCommands![0])
+    await waitFor(() => m.statusOf('p1', 'q1') === 'failed')
+    expect(m.logsOf('p1', 'q1').join('\n')).toContain('退出码 3')
+  })
+
+  it('运行中重复 runTask → 忽略（不产生第二份 runtime 记录/进程）', async () => {
+    let saved: RuntimeFile | undefined
+    const proj = mkQuickProject('node -e "setInterval(() => {}, 200)"')
+    const m = mkManager({ onRuntimeChange: rf => (saved = rf) })
+    m.runTask(proj, proj.quickCommands![0])
+    m.runTask(proj, proj.quickCommands![0])
+    expect(m.statusOf('p1', 'q1')).toBe('running')
+    const pid = saved!['p1:q1']!.pid
+    expect(saved!['p1:q1']!.task).toBe(true) // runtime 记录带任务标记（restore 不探端口）
+    await new Promise(r => setTimeout(r, 150))
+    expect(saved!['p1:q1']?.pid).toBe(pid) // 未被第二次调用重置
+    await m.stop('p1', 'q1')
+  })
+
+  it('stop 杀任务进程，状态回 stopped', async () => {
+    let saved: RuntimeFile | undefined
+    const proj = mkQuickProject('node -e "console.log(1); setInterval(() => {}, 200)"')
+    const m = mkManager({ onRuntimeChange: rf => (saved = rf) })
+    m.runTask(proj, proj.quickCommands![0])
+    await waitFor(() => saved?.['p1:q1']?.pid !== undefined)
+    const pid = saved!['p1:q1']!.pid
+    await m.stop('p1', 'q1')
+    expect(m.statusOf('p1', 'q1')).toBe('stopped')
+    await waitFor(() => !alive(pid))
+  })
+
+  it('restore：任务记录 pid 存活 → 直接 running 并从文件播种日志（不探端口）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pt-log-'))
+    const proj = mkQuickProject('node -e "console.log(\'TASK_LOG\'); setInterval(() => {}, 200)"')
+    let saved: RuntimeFile | undefined
+    const a = mkManager({ logDir: () => dir, onRuntimeChange: rf => (saved = rf) })
+    a.runTask(proj, proj.quickCommands![0])
+    await waitFor(() => saved?.['p1:q1']?.pid !== undefined)
+    await waitFor(() => a.logsOf('p1', 'q1').some(l => l.includes('TASK_LOG')))
+    const b = mkManager({ logDir: () => dir })
+    await b.restore([proj], { 'p1:q1': saved!['p1:q1']! }) // 项目无端口可探，存活即恢复
+    expect(b.statusOf('p1', 'q1')).toBe('running')
+    expect(b.logsOf('p1', 'q1').some(l => l.includes('TASK_LOG'))).toBe(true)
+    await b.stop('p1', 'q1')
+  })
+
+  it('子进程环境剥离 npm 注入的元数据（npm_config/package/lifecycle_* 与 INIT_CWD），PATH 保留', async () => {
+    // 启动器经 npm run 启动时环境里带着 npm_config_*（本测试即运行在 npm 上下文中），
+    // 子命令不应继承——否则会以 env 配置优先级覆盖目标项目自己的 .npmrc
+    const proj = mkQuickProject(
+      'node -e "console.log(\'ENVCHK:\' + JSON.stringify({ npm: Object.keys(process.env).filter(k => /^npm_(config|package|lifecycle)_/i.test(k)), init: process.env.INIT_CWD ?? \'\', hasPath: !!process.env.PATH }))"')
+    const m = mkManager()
+    m.runTask(proj, proj.quickCommands![0])
+    await waitFor(() => m.statusOf('p1', 'q1') === 'stopped')
+    const line = m.logsOf('p1', 'q1').find(l => l.includes('ENVCHK:{')) // 头行回显命令源码也含 ENVCHK:，只认真实输出
+    const parsed = JSON.parse(line!.slice(line!.indexOf('ENVCHK:') + 'ENVCHK:'.length))
+    expect(parsed.npm).toEqual([])
+    expect(parsed.init).toBe('')
+    expect(parsed.hasPath).toBe(true)
   })
 })

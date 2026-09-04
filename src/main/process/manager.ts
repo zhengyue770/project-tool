@@ -3,7 +3,7 @@ import { kill } from 'node:process'
 import { join, resolve } from 'node:path'
 import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
 import type {
-  CommandConfig, CommandRuntimeStatus, Project, RuntimeFile
+  CommandConfig, CommandRuntimeStatus, Project, QuickCommand, RuntimeFile, RuntimeRecord
 } from '../../shared/types'
 import { runtimeKey } from '../../shared/types'
 import { probe, probePort, portFromUrl } from './health'
@@ -22,6 +22,22 @@ export interface ManagerOptions {
 export interface CommandStatusEvent { projectId: string; commandId: string; status: CommandRuntimeStatus }
 
 const MAX_LOG_LINES = 500
+
+/** 子进程环境过滤：启动器经 npm script（npm run dev 等）启动时，npm 会把全部配置
+ *  导出为 npm_config_* 环境变量——其优先级高于目标项目自己的 .npmrc，会把
+ *  registry/镜像/鉴权等整体渗进被管理项目的命令；npm_package_* / npm_lifecycle_* 与
+ *  INIT_CWD 是启动器上下文元数据（INIT_CWD 还指向启动器目录），对目标项目无价值。
+ *  npm 对环境配置前缀做大小写不敏感匹配，故用 i 标志；PATH/HOME/SHELL/代理等原样保留。 */
+const NPM_META_ENV_RE = /^npm_(config|package|lifecycle)_/i
+
+function childEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {}
+  for (const [k, v] of Object.entries(process.env)) {
+    if (NPM_META_ENV_RE.test(k) || k === 'INIT_CWD') continue
+    env[k] = v
+  }
+  return env
+}
 
 /** v1.1 动态端口：内置捕获规则（不加 g 标志——复用 exec 不受 lastIndex 影响） */
 const DEFAULT_PORT_RE = /(?:localhost|127\.0\.0\.1):(\d{2,5})/
@@ -43,6 +59,8 @@ interface Entry {
   logSubs: Set<(lines: string[]) => void>
   /** 启动代际：每次 start() 自增；旧一轮的 exit/error/定时器回调凭 gen 失效，避免污染新一轮运行 */
   gen: number
+  /** 快捷命令任务模式（spec 2026-09-04）：spawn 即 running、退出码定成败、不探端口 */
+  task: boolean
   /** v1.1：本次运行的端口模式（动态=从日志捕获真实地址再探测） */
   dynamic: boolean
   /** v1.1：生效的端口捕获正则（仅动态模式有值） */
@@ -108,6 +126,7 @@ export class ProcessManager {
     e.logs = []
     e.partial = ''
     e.pending = []
+    e.task = false // 服务模式（entry 可能上一轮是任务）
     // v1.1 端口模式：ipc 层已校验自定义正则可编译，这里 try/catch 兜底用内置规则
     e.dynamic = command.portMode === 'dynamic'
     if (e.dynamic && command.successPattern?.trim()) {
@@ -118,61 +137,7 @@ export class ProcessManager {
     e.discoveredUrl = null
 
     const cwd = resolve(project.path, command.workdir || '.')
-    // v1.1a: stdio 重定向到日志文件而非管道——管道读端随应用退出关闭，子进程下次写日志会收到 EPIPE 崩溃
-    // （违反"退出应用不杀项目进程"）。文件每次启动截断（有界）；以 'a' 打开让子进程 O_APPEND 续写，
-    // 这样 clearLogs 运行中截断后子进程从新 EOF 写起，不留稀疏空洞。父进程 spawn 后即 close 自己的 fd，
-    // 不持有任何管道/文件描述符依赖。
-    const file = this.logFileFor(k)
-    mkdirSync(this.opts.logDir(), { recursive: true })
-    // v1.1b: 会话头行随截断一并写入文件本身（文件里带时间后缀）——应用重开 restore 从文件头播种时它也在最前
-    const header = `$ ${command.cmd}  (cwd: ${cwd}) @ ${new Date().toLocaleString()}\n`
-    writeFileSync(file, header)
-    const fd = openSync(file, 'a')
-    const child = spawn(command.cmd, {
-      shell: true,
-      detached: true, // 新进程组（pgid === child.pid），保证整组可杀
-      cwd,
-      env: { ...process.env },
-      stdio: ['ignore', fd, fd]
-    })
-    closeSync(fd)
-    e.child = child
-    e.pid = child.pid
-    this.runtime[k] = { pid: child.pid as number, startedAt: Date.now() }
-    this.emitRuntime()
-    this.append(e, `$ ${command.cmd}  (cwd: ${cwd})`) // 头行进缓冲/订阅推送（带时间前缀）；文件里的一份由上方 writeFileSync 落盘
-
-    e.logFile = file
-    e.offset = header.length // tail 从文件头行之后起读——头行已在缓冲里，避免再经 ingest 重复入缓冲
-    this.startTail(k, e, gen)
-
-    child.on('exit', () => {
-      // 代际守卫：旧进程退出时该 entry 可能已被新一轮 start 接管，不能动新运行的状态/timers/runtime
-      if (gen !== e.gen) return
-      this.tailOnce(e) // 临终输出（如报错栈）最后一次补读，再停轮询——否则 300ms 轮询间隙里的末尾日志会丢
-      this.clearTimers(e)
-      const was = e.status
-      e.child = undefined
-      delete this.runtime[k]
-      this.emitRuntime()
-      // starting 中退出 = 启动失败；running 后退出 = 回到已停止；已 failed/stopped 的跳过（超时/手动停止已处理）
-      if (was === 'starting') this.setStatus(k, e, project.id, command.id, 'failed')
-      else if (was === 'running') this.setStatus(k, e, project.id, command.id, 'stopped')
-    })
-    child.on('error', err => {
-      // 代际守卫：同 exit——旧 child 的 error 不属于当前运行
-      if (gen !== e.gen) return
-      // spawn 失败（如 workdir 指向不存在的目录）：异步 error 事件，exit 可能不再触发
-      this.append(e, `[错误] ${String(err)}`)
-      this.tailOnce(e) // 补读再停轮询，与 exit 路径一致
-      this.clearTimers(e)
-      const was = e.status
-      e.child = undefined
-      delete this.runtime[k]
-      this.emitRuntime()
-      // 仅在尚未被超时/停止流程处置时标记 failed，避免重复发事件
-      if (was === 'starting' || was === 'running') this.setStatus(k, e, project.id, command.id, 'failed')
-    })
+    this.launch(k, e, gen, project.id, command.id, command.cmd, cwd)
 
     // v1.1g 探测目标：固定模式用户显式给了地址按原样探；其余双栈探测端口——vite 等默认绑 localhost，
     // 部分机器 localhost 只落 ::1，写死 127.0.0.1 会误报启动失败
@@ -208,6 +173,27 @@ export class ProcessManager {
     }, this.opts.startupTimeoutMs())
   }
 
+  /** 快捷命令任务模式（spec 2026-09-04）：spawn 即 running，无端口探测/启动超时；
+   *  退出码 0 → stopped、非 0/信号 → failed。日志/停止/恢复与命令共用一套机制 */
+  runTask(project: Project, quick: QuickCommand): void {
+    const k = runtimeKey(project.id, quick.id)
+    const e = this.entry(k)
+    if (e.status === 'starting' || e.status === 'running') return
+    e.gen++
+    const gen = e.gen
+    this.clearTimers(e)
+    e.task = true
+    e.dynamic = false
+    e.pattern = undefined
+    e.discoveredUrl = null
+    this.setStatus(k, e, project.id, quick.id, 'running')
+    e.logs = []
+    e.partial = ''
+    e.pending = []
+    const cwd = resolve(project.path, quick.workdir || '.')
+    this.launch(k, e, gen, project.id, quick.id, quick.cmd, cwd, { task: true })
+  }
+
   /** 停止单条命令（运行中或启动中才需要停） */
   async stop(projectId: string, commandId: string): Promise<void> {
     const k = runtimeKey(projectId, commandId)
@@ -227,37 +213,47 @@ export class ProcessManager {
     )
   }
 
-  /** 应用重启后的状态恢复：pid 存活 && 端口有服务 → running（此后可按 pgid 停止）；否则丢弃记录 */
+  /** 应用重启后的状态恢复：服务命令 pid 存活 && 端口有服务 → running（此后可按 pgid 停止）；
+   *  快捷命令（任务模式）pid 存活即 running，无需端口；否则丢弃记录 */
   async restore(projects: Project[], runtime: RuntimeFile): Promise<void> {
     this.runtime = {}
     for (const p of projects) {
-      for (const c of p.commands) {
-        const k = runtimeKey(p.id, c.id)
+      // [commandId, 是否任务模式]：服务命令 + 快捷命令（spec 2026-09-04）
+      const cmdList: Array<[string, boolean]> = [
+        ...p.commands.map(c => [c.id, false] as [string, boolean]),
+        ...(p.quickCommands ?? []).map(q => [q.id, true] as [string, boolean])
+      ]
+      for (const [cid, isTask] of cmdList) {
+        const k = runtimeKey(p.id, cid)
         const rec = runtime[k]
         if (!rec) continue
         const live = this.alive(rec.pid)
+        if (!live) continue
         // v1.1a: 动态命令端口为 0，固定地址必探不通——改探 runtime 记录里持久化的 discoveredUrl；
         // 记录缺失（旧版 runtime.json）则无法验证真实端口，按 stopped 丢弃，宁错杀不误杀
         // v1.1g: 探测双栈化（127.0.0.1 与 [::1]）——恢复与启动同一套语义，dev server 可能只绑 IPv6 回环
-        const check = (): Promise<boolean> => {
+        const c = p.commands.find(x => x.id === cid)
+        let ok = true
+        if (!isTask && c) {
           if (c.portMode === 'dynamic') {
-            const p = rec.discoveredUrl ? portFromUrl(rec.discoveredUrl) : null
-            return p ? probePort(p) : Promise.resolve(false) // 缺 discoveredUrl：探不通即丢弃记录
+            const pp = rec.discoveredUrl ? portFromUrl(rec.discoveredUrl) : null
+            ok = pp ? await probePort(pp) : false // 缺 discoveredUrl：探不通即丢弃记录
+          } else {
+            const custom = c.healthCheckUrl?.trim()
+            ok = custom ? await probe(custom) : await probePort(c.port)
           }
-          const custom = c.healthCheckUrl?.trim()
-          return custom ? probe(custom) : probePort(c.port)
         }
-        if (live && (await check())) {
-          const e = this.entry(k)
-          e.status = 'running'
-          e.pid = rec.pid
-          if (c.portMode === 'dynamic') {
-            e.dynamic = true
-            e.discoveredUrl = rec.discoveredUrl // 卡片显示真实端口
-          }
-          this.runtime[k] = rec
-          this.adoptLogTail(k, e) // v1.1b: 采用后从文件头播种日志缓冲并续读增量，重开后日志面板可见本次运行从头开始的日志
+        if (!ok) continue
+        const e = this.entry(k)
+        e.status = 'running'
+        e.pid = rec.pid
+        if (isTask) e.task = true
+        else if (c?.portMode === 'dynamic') {
+          e.dynamic = true
+          e.discoveredUrl = rec.discoveredUrl // 卡片显示真实端口
         }
+        this.runtime[k] = rec
+        this.adoptLogTail(k, e) // v1.1b: 采用后从文件头播种日志缓冲并续读增量，重开后日志面板可见本次运行从头开始的日志
       }
     }
     this.emitRuntime()
@@ -265,10 +261,80 @@ export class ProcessManager {
 
   // ---- 内部工具 ----
 
+  /** 公共落盘/spawn/日志接管（服务与任务模式共用）：日志文件 stdio（v1.1a 防 EPIPE）、
+   *  会话头行落文件（v1.1b）、tail 轮询、exit/error 处理（语义按 e.task 分支） */
+  private launch(
+    k: string, e: Entry, gen: number,
+    projectId: string, commandId: string, cmd: string, cwd: string,
+    runtimeExtra: Partial<RuntimeRecord> = {}
+  ): ChildProcess {
+    const file = this.logFileFor(k)
+    mkdirSync(this.opts.logDir(), { recursive: true })
+    const header = `$ ${cmd}  (cwd: ${cwd}) @ ${new Date().toLocaleString()}\n`
+    writeFileSync(file, header)
+    const fd = openSync(file, 'a')
+    const child = spawn(cmd, {
+      shell: true,
+      detached: true, // 新进程组（pgid === child.pid），保证整组可杀
+      cwd,
+      env: childEnv(),
+      stdio: ['ignore', fd, fd]
+    })
+    closeSync(fd)
+    e.child = child
+    e.pid = child.pid
+    this.runtime[k] = { pid: child.pid as number, startedAt: Date.now(), ...runtimeExtra }
+    this.emitRuntime()
+    this.append(e, `$ ${cmd}  (cwd: ${cwd})`) // 头行进缓冲/订阅推送（带时间前缀）；文件里的一份由上方 writeFileSync 落盘
+
+    e.logFile = file
+    e.offset = header.length // tail 从文件头行之后起读——头行已在缓冲里，避免再经 ingest 重复入缓冲
+    this.startTail(k, e, gen)
+
+    child.on('exit', code => {
+      // 代际守卫：旧进程退出时该 entry 可能已被新一轮 start 接管，不能动新运行的状态/timers/runtime
+      if (gen !== e.gen) return
+      this.tailOnce(e) // 临终输出（如报错栈）最后一次补读，再停轮询——否则 300ms 轮询间隙里的末尾日志会丢
+      this.clearTimers(e)
+      const was = e.status
+      e.child = undefined
+      delete this.runtime[k]
+      this.emitRuntime()
+      if (e.task) {
+        // 任务模式：已被停止/新一轮处置的不再改状态；退出码 0=完成，非 0/信号=失败
+        if (was !== 'running' && was !== 'starting') return
+        if (code === 0) this.setStatus(k, e, projectId, commandId, 'stopped')
+        else {
+          this.append(e, `[进程退出，退出码 ${code ?? 'null'}]`)
+          this.setStatus(k, e, projectId, commandId, 'failed')
+        }
+      } else {
+        // 服务模式：starting 中退出 = 启动失败；running 后退出 = 回到已停止；已 failed/stopped 的跳过（超时/手动停止已处理）
+        if (was === 'starting') this.setStatus(k, e, projectId, commandId, 'failed')
+        else if (was === 'running') this.setStatus(k, e, projectId, commandId, 'stopped')
+      }
+    })
+    child.on('error', err => {
+      // 代际守卫：同 exit——旧 child 的 error 不属于当前运行
+      if (gen !== e.gen) return
+      // spawn 失败（如 workdir 指向不存在的目录）：异步 error 事件，exit 可能不再触发
+      this.append(e, `[错误] ${String(err)}`)
+      this.tailOnce(e) // 补读再停轮询，与 exit 路径一致
+      this.clearTimers(e)
+      const was = e.status
+      e.child = undefined
+      delete this.runtime[k]
+      this.emitRuntime()
+      // 仅在尚未被超时/停止流程处置时标记 failed，避免重复发事件
+      if (was === 'starting' || was === 'running') this.setStatus(k, e, projectId, commandId, 'failed')
+    })
+    return child
+  }
+
   private entry(k: string): Entry {
     let e = this.entries.get(k)
     if (!e) {
-      e = { status: 'stopped', key: k, logs: [], partial: '', pending: [], logSubs: new Set(), gen: 0, dynamic: false, offset: 0 }
+      e = { status: 'stopped', key: k, logs: [], partial: '', pending: [], logSubs: new Set(), gen: 0, dynamic: false, task: false, offset: 0 }
       this.entries.set(k, e)
     }
     return e
