@@ -14,12 +14,27 @@ watch(visible, v => emit('update:modelValue', v))
 const info = ref<StorageInfo | null>(null)
 const timeoutSeconds = ref(60)
 const autoLaunch = ref(false)
+const version = ref('')
+const checking = ref(false)
 
 async function load(): Promise<void> {
   info.value = await api.getStorageInfo()
   const s = await api.getSettings()
   timeoutSeconds.value = Math.round(s.startupTimeoutMs / 1000)
   autoLaunch.value = s.autoLaunch
+  version.value = (await api.getUpdateState()).currentVersion
+}
+
+async function checkUpdate(): Promise<void> {
+  checking.value = true
+  try {
+    const s = await api.checkUpdate()
+    if (s.status === 'available') ElMessage.success(`发现新版本 v${s.remoteVersion}，点击右上角下载图标更新`)
+    else if (s.status === 'not-available') ElMessage.success(`已是最新版本 v${s.currentVersion}`)
+    else if (s.message) ElMessage.error(s.message)
+  } finally {
+    checking.value = false
+  }
 }
 
 async function saveSettings(): Promise<void> {
@@ -66,6 +81,12 @@ async function changeDir(): Promise<void> {
       </el-form-item>
       <el-form-item label="开机自启">
         <el-switch v-model="autoLaunch" />
+      </el-form-item>
+      <el-form-item label="当前版本">
+        <div style="display: flex; gap: 8px; align-items: center">
+          <span style="font-size: 13px">v{{ version }}</span>
+          <el-button :loading="checking" @click="checkUpdate">检查更新</el-button>
+        </div>
       </el-form-item>
     </el-form>
     <template #footer>
