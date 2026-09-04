@@ -16,7 +16,7 @@ async function copy(text: string, tip: string): Promise<void> {
 <template>
   <el-popover placement="bottom" :width="480" trigger="click">
     <template #reference>
-      <el-button :icon="User" :disabled="accounts.length === 0">账号</el-button>
+      <el-button :icon="User">账号</el-button>
     </template>
     <el-table :data="accounts" size="small">
       <el-table-column prop="label" label="标签" width="80" />

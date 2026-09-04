@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog } from 'electron'
 import { join } from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, rmSync } from 'node:fs'
 import { StoragePaths } from './store/storagePaths'
 import { ProjectsStore } from './store/projectsStore'
 import { SettingsStore } from './store/settingsStore'
@@ -8,6 +8,9 @@ import { RuntimeStore } from './store/runtimeStore'
 import { ProcessManager } from './process/manager'
 import { registerIpc } from './ipc'
 import { augmentPathFromLoginShell } from './env'
+import { AppUpdater } from './updater/updater'
+import { resolveAppBundle } from './updater/installer'
+import { GitBranchService } from './git/branch'
 
 // spec §4.1：固定默认数据目录为 .../project-tool（Electron 默认会优先取 productName「项目启动器」）
 app.setPath('userData', join(app.getPath('appData'), 'project-tool'))
@@ -91,7 +94,32 @@ app.whenReady().then(async () => {
   })
   await manager.restore(projectsFile.projects, runtimeStore.load())
 
-  registerIpc({ getWin: () => win, paths, projectsStore, settingsStore, runtimeStore, manager })
+  // 自动更新（spec 2026-09-04）：清空上次缓存（zip/解压产物/替换脚本）；
+  // appName 须与 electron-builder.yml 的 productName 一致（zip 内 .app 的名字）
+  const updateCacheDir = join(app.getPath('userData'), 'update-cache')
+  rmSync(updateCacheDir, { recursive: true, force: true })
+  const updater = new AppUpdater({
+    repo: 'zhengyue770/project-tool',
+    appName: '项目启动器',
+    currentVersion: app.getVersion(),
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    arch: process.arch,
+    appBundlePath: resolveAppBundle(app.getAppPath(), app.isPackaged),
+    cacheDir: updateCacheDir,
+    quitApp: () => app.quit()
+  })
+  if (app.isPackaged) {
+    // 启动 8s 后首次检查（不抢启动性能），此后每 6h 复查
+    setTimeout(() => void updater.check(), 8000)
+    setInterval(() => void updater.check(), 6 * 60 * 60 * 1000)
+  }
+
+  // git 分支（spec 2026-09-04-git-branch）：启动后台预热各项目当前分支，完成后逐项目推送刷新
+  const branches = new GitBranchService(() => projectsStore.load().projects)
+  void branches.refreshAll()
+
+  registerIpc({ getWin: () => win, paths, projectsStore, settingsStore, runtimeStore, manager, updater, branches })
 })
 
 app.on('window-all-closed', () => {
