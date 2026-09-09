@@ -33,6 +33,9 @@ export function parseVersion(v: string): SemVer | null {
   const preStr = dash === -1 ? '' : main.slice(dash + 1)
   if (!/^\d+(\.\d+)*$/.test(coreStr)) return null
   const core = coreStr.split('.')
+  // 核心段数限定两段或三段（项目约定：三段为准，两段补零兼容；一段/四段及
+  // 以上为畸形标签，拒绝——review 修正）
+  if (core.length < 2 || core.length > 3) return null
   if (core.some(c => c.length > 1 && c.startsWith('0'))) return null // 核心段禁前导零
   if (dash !== -1 && preStr === '') return null // 尾部裸横线（1.3.0-）非法
   const pre = preStr ? preStr.split('.') : []

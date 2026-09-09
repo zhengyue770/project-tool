@@ -30,6 +30,14 @@ describe('parseVersion', () => {
     expect(parseVersion('1.3.0-beta!')).toBeNull()
   })
 
+  it('review 修正：核心段数限定两段或三段——一段/四段畸形标签 → null、不判有更新', () => {
+    expect(parseVersion('1')).toBeNull()
+    expect(parseVersion('1.2.0.1')).toBeNull()
+    expect(parseVersion('1.2.3.4.5')).toBeNull()
+    expect(isNewerVersion('1.2.0.1', '1.2.0')).toBe(false)
+    expect(isNewerVersion('2', '1.2.0')).toBe(false)
+  })
+
   it('review 修正：非法 build 元数据（1.3.0+ / 1.3.0+bad!）→ null，不得判有更新', () => {
     expect(parseVersion('1.3.0+')).toBeNull()
     expect(parseVersion('1.3.0+bad!')).toBeNull()
