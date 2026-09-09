@@ -1,22 +1,23 @@
 import { describe, it, expect } from 'vitest'
 import { isNewerVersion, parseVersion } from './version'
 
-// 更新源版本比较（spec 2026-09-04 §4 + 发版预发支持）：完整 semver——核心段
-// 数字比较 + 预发段按 semver 规则（正式 > 预发；标识符数值/字典序；短 < 长；
-// build 元数据忽略）。解析失败一律视为「无更新」，绝不误报。
+// 更新源版本比较（spec 2026-09-04 §4 + 发版预发支持）：semver 严格校验
+// （含项目扩展：v 前缀、两段核心版本补零）；非法版本绝不判「有更新」；
+// 数字段字符串比较无精度损失。解析失败一律视为「无更新」，绝不误报。
 
 describe('parseVersion', () => {
-  it('常规：v 前缀、纯数字、两段补零均可解析；预发段拆成标识符数组', () => {
-    expect(parseVersion('v1.2.0')).toEqual({ core: [1, 2, 0], pre: [] })
-    expect(parseVersion('1.2.0')).toEqual({ core: [1, 2, 0], pre: [] })
-    expect(parseVersion('v2.0')).toEqual({ core: [2, 0], pre: [] })
-    expect(parseVersion('1.3.0-beta.1')).toEqual({ core: [1, 3, 0], pre: ['beta', '1'] })
-    expect(parseVersion('1.3.0-rc.1')).toEqual({ core: [1, 3, 0], pre: ['rc', '1'] })
+  it('常规：v 前缀、纯数字、两段补零（项目扩展）；预发段拆成标识符数组', () => {
+    expect(parseVersion('v1.2.0')).toEqual({ core: ['1', '2', '0'], pre: [] })
+    expect(parseVersion('1.2.0')).toEqual({ core: ['1', '2', '0'], pre: [] })
+    expect(parseVersion('v2.0')).toEqual({ core: ['2', '0'], pre: [] })
+    expect(parseVersion('1.3.0-beta.1')).toEqual({ core: ['1', '3', '0'], pre: ['beta', '1'] })
+    expect(parseVersion('1.3.0-rc.1')).toEqual({ core: ['1', '3', '0'], pre: ['rc', '1'] })
   })
 
-  it('build 元数据忽略；空白容忍', () => {
-    expect(parseVersion('1.3.0+build.5')).toEqual({ core: [1, 3, 0], pre: [] })
-    expect(parseVersion(' 1.3.0-beta.1 ')).toEqual({ core: [1, 3, 0], pre: ['beta', '1'] })
+  it('合法 build 元数据解析并忽略；空白容忍', () => {
+    expect(parseVersion('1.3.0+build.5')).toEqual({ core: ['1', '3', '0'], pre: [] })
+    expect(parseVersion('1.3.0-beta.1+x-1.2')).toEqual({ core: ['1', '3', '0'], pre: ['beta', '1'] })
+    expect(parseVersion(' 1.3.0-beta.1 ')).toEqual({ core: ['1', '3', '0'], pre: ['beta', '1'] })
   })
 
   it('非法输入 → null（非数字段、空标识符、空串、乱码）', () => {
@@ -27,6 +28,22 @@ describe('parseVersion', () => {
     expect(parseVersion('1.3.0-')).toBeNull()
     expect(parseVersion('1.3.0-beta..1')).toBeNull()
     expect(parseVersion('1.3.0-beta!')).toBeNull()
+  })
+
+  it('review 修正：非法 build 元数据（1.3.0+ / 1.3.0+bad!）→ null，不得判有更新', () => {
+    expect(parseVersion('1.3.0+')).toBeNull()
+    expect(parseVersion('1.3.0+bad!')).toBeNull()
+    expect(parseVersion('1.3.0+build.')).toBeNull()
+    expect(isNewerVersion('1.3.0+', '1.2.0')).toBe(false)
+    expect(isNewerVersion('1.3.0+bad!', '1.2.0')).toBe(false)
+  })
+
+  it('review 修正：预发/核心数字前导零（SemVer §9）→ null', () => {
+    expect(parseVersion('1.3.0-beta.01')).toBeNull()
+    expect(parseVersion('1.3.0-01')).toBeNull()
+    expect(parseVersion('01.2.0')).toBeNull()
+    expect(isNewerVersion('1.3.0-beta.01', '1.2.0')).toBe(false)
+    expect(isNewerVersion('1.3.0-0', '1.2.0')).toBe(true) // 单个 0 合法
   })
 })
 
@@ -71,8 +88,19 @@ describe('isNewerVersion：semver 预发段（发版实测轮）', () => {
     expect(isNewerVersion('1.3.0-alpha', '1.3.0-1')).toBe(true) // 数字段排在字母前
     expect(isNewerVersion('1.3.0-beta.1', '1.3.0-beta')).toBe(true) // 长 > 短
     expect(isNewerVersion('1.3.0-beta.1', '1.3.0-beta.1')).toBe(false)
-    // build 元数据不参与比较
+    // 合法 build 元数据不参与比较
     expect(isNewerVersion('1.3.0+build.9', '1.3.0')).toBe(false)
+    expect(isNewerVersion('1.3.0+build.9', '1.2.0')).toBe(true)
+  })
+
+  it('review 修正：超过 2^53 的大数字段无精度损失', () => {
+    // 预发数字标识符：9007199254740993 > 9007199254740992（Number 会丢精度判等）
+    expect(isNewerVersion('1.3.0-beta.9007199254740993', '1.3.0-beta.9007199254740992')).toBe(true)
+    expect(isNewerVersion('1.3.0-beta.9007199254740992', '1.3.0-beta.9007199254740993')).toBe(false)
+    // 核心段大数：位数不同 / 同位字典序
+    expect(isNewerVersion('1.9007199254740993.0', '1.9007199254740992.0')).toBe(true)
+    expect(isNewerVersion('1.99999999999999999999.0', '1.9007199254740999.0')).toBe(true)
+    expect(isNewerVersion('1.9007199254740992.0', '1.9007199254740992.0')).toBe(false)
   })
 
   it('同核心的预发不高于正式；低核心的预发不高于高核心正式', () => {
