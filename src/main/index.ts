@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, safeStorage } from 'electron'
 import { join } from 'node:path'
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import { StoragePaths } from './store/storagePaths'
 import { ProjectsStore } from './store/projectsStore'
 import { SettingsStore } from './store/settingsStore'
@@ -125,7 +125,28 @@ app.whenReady().then(async () => {
   // 自动更新（spec 2026-09-04）：清空上次缓存（zip/解压产物/替换脚本）；
   // appName 须与 electron-builder.yml 的 productName 一致（zip 内 .app 的名字）
   const updateCacheDir = join(app.getPath('userData'), 'update-cache')
-  rmSync(updateCacheDir, { recursive: true, force: true })
+  // beta.2 实测暴露：残留解压树可能让 rmSync 抛错（ENOTDIR）并中断整个 whenReady
+  // （IPC 未注册、界面全坏）——清缓存绝不能杀启动：失败改名隔离，下载器按需重建
+  const wipeQuarantines = (): void => {
+    try {
+      for (const name of readdirSync(app.getPath('userData'))) {
+        if (name.startsWith('update-cache.quarantine-')) {
+          rmSync(join(app.getPath('userData'), name), { recursive: true, force: true })
+        }
+      }
+    } catch { /* 尽力清理旧隔离目录，失败留待下次 */ }
+  }
+  try {
+    rmSync(updateCacheDir, { recursive: true, force: true })
+    wipeQuarantines()
+  } catch (err) {
+    console.warn(`[updater] 清空更新缓存失败（${(err as Error).message}），改名隔离后继续启动`)
+    try {
+      renameSync(updateCacheDir, `${updateCacheDir}.quarantine-${Date.now()}`)
+    } catch (err2) {
+      console.warn(`[updater] 缓存隔离也失败（${(err2 as Error).message}），继续启动（下载前会重建目录）`)
+    }
+  }
 
   // 退出网关（hardening 2a，review 修正 #3/#4）：普通退出与更新安装共用，
   // 单一阶段状态防并行；取消/失败路径统一撤销排空
