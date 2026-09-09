@@ -11,10 +11,10 @@ type Scanned = { source: QuickSyncSource; name: string; cmd: string }
 const withId = (s: Scanned): QuickCommand =>
   ({ id: `sync:${s.source}:${s.name}`, name: s.name, cmd: s.cmd, source: s.source })
 
-/** 参数名含空白/引号时整体加单引号防拆词；名内单引号按 POSIX 惯用法转义
- *  （单引号内无法转义自身，用 闭引号 + \' + 重开引号 拼接，如 it's → 'it'\''s'） */
-const quote = (name: string): string =>
-  /[\s'"]/.test(name) ? `'${name.replace(/'/g, `'\\''`)}'` : name
+/** 生成的命令参数一律单引号包裹（内部 ' 按惯用法转义：闭引号 + \' + 重开引号）。
+ *  无条件包裹是刻意的：条件式（仅含空白/引号才包）会放过「不含空白的元字符」
+ *  （如 a;b、$(x)），拼出的命令会被 shell 解释——关闭脚本名的注入入口。 */
+export const quote = (name: string): string => `'${name.replace(/'/g, `'\\''`)}'`
 
 // ---- package.json ----
 

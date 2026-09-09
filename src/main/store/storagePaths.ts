@@ -1,5 +1,6 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { writeJsonAtomic } from './jsonFile'
 
 const POINTER_FILE = 'storage-pointer.json'
 
@@ -21,10 +22,10 @@ export class StoragePaths {
     return this.defaultDir
   }
 
-  /** 正式切换数据目录（写指针）。迁移流程校验通过后调用 */
+  /** 正式切换数据目录（写指针，hardening 1c 原子写：满盘/写错不截断旧指针） */
   setDataDir(dir: string): void {
     mkdirSync(this.defaultDir, { recursive: true })
-    writeFileSync(this.pointerFile, JSON.stringify({ dataDir: dir }, null, 2))
+    writeJsonAtomic(this.pointerFile, { dataDir: dir })
     this.sessionDir = null
   }
 

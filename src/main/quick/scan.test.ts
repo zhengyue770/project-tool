@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  pickRunner, parsePackageJsonScripts, parseMakefileTargets,
+  quote, pickRunner, parsePackageJsonScripts, parseMakefileTargets,
   parseJustfileRecipes, parseComposerScripts, scanQuickCommands
 } from './scan'
 
@@ -32,8 +33,8 @@ describe('parsePackageJsonScripts', () => {
   it('scripts → <runner> run <name>，保持定义顺序', () => {
     const out = parsePackageJsonScripts({ scripts: { dev: 'vite', build: 'vite build' } }, 'pnpm')
     expect(out).toEqual([
-      { source: 'package.json', name: 'dev', cmd: 'pnpm run dev' },
-      { source: 'package.json', name: 'build', cmd: 'pnpm run build' }
+      { source: 'package.json', name: 'dev', cmd: `pnpm run 'dev'` },
+      { source: 'package.json', name: 'build', cmd: `pnpm run 'build'` }
     ])
   })
 
@@ -80,7 +81,7 @@ describe('parseMakefileTargets', () => {
 
   it('目标名只取第一个（all: build test → make all）', () => {
     const out = parseMakefileTargets('all: build test\n\t@echo hi\n')
-    expect(out).toEqual([{ source: 'Makefile', name: 'all', cmd: 'make all' }])
+    expect(out).toEqual([{ source: 'Makefile', name: 'all', cmd: `make 'all'` }])
   })
 })
 
@@ -107,8 +108,8 @@ describe('parseComposerScripts', () => {
   it('scripts → composer run <name>', () => {
     const out = parseComposerScripts({ scripts: { test: 'phpunit', 'post-install-cmd': 'x' } })
     expect(out).toEqual([
-      { source: 'composer.json', name: 'test', cmd: 'composer run test' },
-      { source: 'composer.json', name: 'post-install-cmd', cmd: 'composer run post-install-cmd' }
+      { source: 'composer.json', name: 'test', cmd: `composer run 'test'` },
+      { source: 'composer.json', name: 'post-install-cmd', cmd: `composer run 'post-install-cmd'` }
     ])
   })
 
@@ -133,10 +134,10 @@ describe('scanQuickCommands（目录级组合扫描）', () => {
     })
     const out = scanQuickCommands(dir)
     expect(out.map(q => [q.id, q.cmd])).toEqual([
-      ['sync:package.json:dev', 'npm run dev'],
-      ['sync:Makefile:build', 'make build'],
-      ['sync:Justfile:check', 'just check'],
-      ['sync:composer.json:test', 'composer run test']
+      ['sync:package.json:dev', `npm run 'dev'`],
+      ['sync:Makefile:build', `make 'build'`],
+      ['sync:Justfile:check', `just 'check'`],
+      ['sync:composer.json:test', `composer run 'test'`]
     ])
   })
 
@@ -155,4 +156,26 @@ describe('scanQuickCommands（目录级组合扫描）', () => {
   it('Justfile 大小写两种文件名都识别', () => {
     expect(scanQuickCommands(tmpProject({ justfile: 'a:\n  echo\n' })).map(q => q.source)).toEqual(['Justfile'])
   })
+})
+
+// hardening 1a：无条件单引号包裹的注入关闭验证——交给真实 /bin/sh 解析后必须
+// 原样还原参数本身（若 $(...)、; 等被解释，回读结果就不再等于原始名字）。
+describe('quote 真实 shell 往返', () => {
+  const nasty = [
+    'dev',
+    'my script',
+    "it's a test",
+    'a;touch /tmp/pt-pwned',
+    '$(touch /tmp/pt-pwned)',
+    '`touch /tmp/pt-pwned`',
+    'a|b&c>d',
+    'a\\b',
+    '引 号 汉字'
+  ]
+  for (const name of nasty) {
+    it(`shell 解析后原样还原：${JSON.stringify(name)}`, () => {
+      const out = execFileSync('/bin/sh', ['-c', `printf %s ${quote(name)}`]).toString()
+      expect(out).toBe(name)
+    })
+  }
 })

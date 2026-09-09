@@ -25,12 +25,40 @@ export function applySync(existing: QuickCommand[] | undefined, scanned: QuickCo
   return out
 }
 
-/** 与启动命令重复的同步命令不导入：命令串一致且启动命令也在项目根执行才算重复
- *  （同步命令固定在项目根跑；启动命令配了子目录则是另一回事）。后续启动命令变更
- *  与同步命令撞车时，下次同步即自动移除已有的重复同步命令。 */
+/** 与启动命令重复的同步命令不导入。比较用**保守识别**（hardening 计划 1a）：
+ *  只认扫描器实际生成的明确形式（同 runner 才比较），名字槽位允许一层成对
+ *  单引号；npm 裸名（npm dev）、内置命令（yarn add / bun install）、含操作符
+ *  或任何无法确定的语法 → 一律不判重——宁可多显示一条快捷命令，不错误隐藏。 */
 export function dropStartupDuplicates(startup: CommandConfig[], scanned: QuickCommand[]): QuickCommand[] {
-  const dup = new Set(startup.map(c => `${c.cmd.trim()}\u0000${c.workdir || '.'}`))
-  return scanned.filter(q => !dup.has(`${q.cmd.trim()}\u0000.`))
+  const dup = new Set<string>()
+  for (const c of startup) {
+    const key = commandScriptKey(c.cmd)
+    // 同步命令固定在项目根执行；启动命令配了子目录不算重复
+    if (key && (c.workdir || '.') === '.') dup.add(`${key.runner}\u0000${key.name}`)
+  }
+  return scanned.filter(q => {
+    const k = commandScriptKey(q.cmd)
+    return !(k && dup.has(`${k.runner}\u0000${k.name}`))
+  })
+}
+
+/** 识别「<runner> run <名字>」等扫描器生成的命令形式，提取 (runner, 名字)；
+ *  无法确定返回 null。裸名只允许安全字面量字符——不含括号（`foo(bar)` 裸拼在
+ *  sh 里是语法错误，与带引号的合法形式判等会错误隐藏有效快捷命令，review 修正）；
+ *  带引号的槽位可含任意非单引号字符。出现 $、反引号、操作符、多段命令 → null */
+export function commandScriptKey(cmd: string): { runner: string; name: string } | null {
+  const s = cmd.trim()
+  const NAME = `([A-Za-z0-9_@:./+=%-]+|'[^']*')`
+  const slot = (raw: string): string => (raw.startsWith("'") ? raw.slice(1, -1) : raw)
+  let m = new RegExp(`^(npm|pnpm|yarn|bun) run ${NAME}$`).exec(s)
+  if (m) return { runner: m[1], name: slot(m[2]) }
+  m = new RegExp(`^make ${NAME}$`).exec(s)
+  if (m) return { runner: 'make', name: slot(m[1]) }
+  m = new RegExp(`^just ${NAME}$`).exec(s)
+  if (m) return { runner: 'just', name: slot(m[1]) }
+  m = new RegExp(`^composer run ${NAME}$`).exec(s)
+  if (m) return { runner: 'composer', name: slot(m[1]) }
+  return null
 }
 
 /** 排除列表（同步命令可删除）：命中排除 id 的扫描命令不参与同步，

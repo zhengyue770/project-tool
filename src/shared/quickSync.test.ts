@@ -90,6 +90,37 @@ describe('dropStartupDuplicates（与启动命令重复的同步命令不导入�
     expect(dropStartupDuplicates([cmd('npm start')], [scanned('dev', 'npm run dev')])).toHaveLength(1)
     expect(dropStartupDuplicates([], [scanned('dev', 'npm run dev')])).toHaveLength(1)
   })
+
+  it('hardening 1a：同步命令带引号与启动命令裸名视为同一（同 runner）', () => {
+    const out = dropStartupDuplicates(
+      [cmd('npm run dev')],
+      [scanned('dev', `npm run 'dev'`), scanned('build', `npm run 'build'`)]
+    )
+    expect(out.map(q => q.name)).toEqual(['build'])
+  })
+
+  it('hardening 1a：不同 runner 不判重', () => {
+    const out = dropStartupDuplicates([cmd('npm run dev')], [scanned('dev', `pnpm run 'dev'`)])
+    expect(out).toHaveLength(1)
+  })
+
+  it('hardening 1a：非生成形式不判重（npm 裸名 / yarn add / 含操作符 / 多段）', () => {
+    // npm 裸名不是 run 语法（npm 只有 start/test 等内置别名）
+    expect(dropStartupDuplicates([cmd('npm dev')], [scanned('dev', `npm run 'dev'`)])).toHaveLength(1)
+    // 内置命令不是脚本
+    expect(dropStartupDuplicates([cmd('yarn add x')], [scanned('add', `yarn run 'add'`)])).toHaveLength(1)
+    // 含操作符/附加参数：无法确认等价，宁可不去重
+    expect(dropStartupDuplicates([cmd('npm run dev;echo hi')], [scanned('dev', `npm run 'dev'`)])).toHaveLength(1)
+    expect(dropStartupDuplicates([cmd('npm run dev -- --inspect')], [scanned('dev', `npm run 'dev'`)])).toHaveLength(1)
+    expect(dropStartupDuplicates([cmd('NODE_ENV=prod npm run dev')], [scanned('dev', `npm run 'dev'`)])).toHaveLength(1)
+  })
+
+  it('review 修正：裸名含括号（foo(bar)，sh 语法错误）→ 不判重；带引号的同名仍判重', () => {
+    // 裸 foo(bar) 在 /bin/sh 中是语法错误，不能与合法的带引号形式判等
+    expect(dropStartupDuplicates([cmd('npm run foo(bar)')], [scanned('x', `npm run 'foo(bar)'`)])).toHaveLength(1)
+    // 双方都是带引号的合法形式 → 正常判重
+    expect(dropStartupDuplicates([cmd(`npm run 'foo(bar)'`)], [scanned('x', `npm run 'foo(bar)'`)])).toHaveLength(0)
+  })
 })
 
 describe('排除列表（同步命令可删除，同步时不再加回）', () => {
