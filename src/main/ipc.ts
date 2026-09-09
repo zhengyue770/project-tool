@@ -1,11 +1,12 @@
-import { ipcMain, dialog, shell, app } from 'electron'
+import { ipcMain, dialog, shell, app, safeStorage } from 'electron'
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { join } from 'node:path'
 import type {
-  AppSettings, CommandRuntimeStatus, Project, ProjectView, StorageInfo, UpdateState
+  AccountInput, AppSettings, BranchList, CommandRuntimeStatus, Project, ProjectView,
+  StorageInfo, StoredAccount, UpdateState
 } from '../shared/types'
 import { aggregateProjectStatus } from './process/state'
 import type { ProcessManager } from './process/manager'
@@ -16,8 +17,17 @@ import type { RuntimeStore } from './store/runtimeStore'
 import { migrateDataDir } from './store/migrator'
 import { scanQuickCommands } from './quick/scan'
 import { applySync, dropStartupDuplicates, filterExcluded, cleanExcluded } from '../shared/quickSync'
+import { mergeAccounts, projectToRenderer, type SafeCrypto } from './store/passwordCrypto'
 import type { AppUpdater } from './updater/updater'
 import type { GitBranchService } from './git/branch'
+import type { QuitGateway } from './quitGateway'
+
+/** safeStorage 适配（app ready 后才被调用；渲染层/测试不直接依赖 electron） */
+const crypto: SafeCrypto = {
+  isEncryptionAvailable: () => safeStorage.isEncryptionAvailable(),
+  encryptString: s => safeStorage.encryptString(s),
+  decryptString: b => safeStorage.decryptString(b)
+}
 
 interface IpcCtx {
   getWin: () => Electron.BrowserWindow | null
@@ -28,6 +38,7 @@ interface IpcCtx {
   manager: ProcessManager
   updater: AppUpdater
   branches: GitBranchService
+  quit: QuitGateway
 }
 
 function toView(p: Project, m: ProcessManager, branches: GitBranchService): ProjectView {
@@ -40,7 +51,7 @@ function toView(p: Project, m: ProcessManager, branches: GitBranchService): Proj
   const quickStates: Record<string, CommandRuntimeStatus> = {}
   for (const q of p.quickCommands ?? []) quickStates[q.id] = m.statusOf(p.id, q.id)
   return {
-    ...p, commandStates, discoveredPorts, quickStates,
+    ...projectToRenderer(crypto, p), commandStates, discoveredPorts, quickStates, // 账号出参：解密，密文不外泄
     aggStatus: aggregateProjectStatus(Object.values(commandStates)),
     branch: branches.cachedOf(p.id) // 缓存直读：未读取 undefined / 非 git null，界面据此隐藏
   }
@@ -113,7 +124,10 @@ export function registerIpc(ctx: IpcCtx): void {
   ipcMain.handle('projects:list', () =>
     projectsStore.load().projects.map(p => toView(p, manager, ctx.branches)))
 
-  ipcMain.handle('projects:create', (_e, p: Project) => {
+  ipcMain.handle('projects:create', (_e, pIn: Project) => {
+    // hardening 批次四：入参密码经哨兵合并（新项目全部视为新密码，逐个加密）
+    // 落盘形态（账号密码可能为密文对象）与 Project 运行时同构，受控转换
+    const p = { ...pIn, accounts: mergeAccounts(crypto, [], pIn.accounts as AccountInput[]) } as unknown as Project
     validateProject(p)
     const saved = autoSyncQuick(p) // 保存后自动读 package.json 等生成同步命令
     projectsStore.upsert(saved)
@@ -121,8 +135,14 @@ export function registerIpc(ctx: IpcCtx): void {
     void ctx.branches.refresh(saved.id).then(() => pushEvent(saved.id))
   })
 
-  ipcMain.handle('projects:update', (_e, id: string, p: Project) => {
-    if (!projectsStore.load().projects.some(x => x.id === id)) throw new Error('项目不存在')
+  ipcMain.handle('projects:update', (_e, id: string, pIn: Project) => {
+    const prior = projectsStore.load().projects.find(x => x.id === id)
+    if (!prior) throw new Error('项目不存在')
+    // 密码未改动（undefined 哨兵）→ 保留存储原值（密文字节不动）；有值 → 加密
+    const p = {
+      ...pIn,
+      accounts: mergeAccounts(crypto, (prior.accounts ?? []) as unknown as StoredAccount[], pIn.accounts as AccountInput[])
+    } as unknown as Project
     validateProject(p)
     const saved = autoSyncQuick({ ...p, id }) // 路径可能已变，重扫一遍
     projectsStore.upsert(saved)
@@ -141,6 +161,7 @@ export function registerIpc(ctx: IpcCtx): void {
   })
 
   ipcMain.handle('projects:start', (_e, id: string, commandId?: string) => {
+    if (manager.draining) throw new Error('应用正在退出，无法启动新命令') // hardening 2a
     const p = projectsStore.load().projects.find(x => x.id === id)
     if (!p) throw new Error('项目不存在')
     if (commandId) {
@@ -169,6 +190,7 @@ export function registerIpc(ctx: IpcCtx): void {
 
   // 快捷命令（spec 2026-09-04 §6）
   ipcMain.handle('quick:execute', (_e, projectId: string, commandId: string) => {
+    if (manager.draining) throw new Error('应用正在退出，无法启动新命令') // hardening 2a
     const p = projectsStore.load().projects.find(x => x.id === projectId)
     const q = p?.quickCommands?.find(c => c.id === commandId)
     if (!p || !q) throw new Error('快捷命令不存在（可能已被同步移除，请重新打开设置）')
@@ -288,5 +310,13 @@ export function registerIpc(ctx: IpcCtx): void {
   ipcMain.handle('update:getState', (): UpdateState => ctx.updater.getState())
   ipcMain.handle('update:check', () => ctx.updater.check())
   ipcMain.handle('update:download', () => ctx.updater.download())
-  ipcMain.handle('update:install', () => ctx.updater.install())
+  ipcMain.handle('update:install', async () => {
+    // hardening 2a（review 修正 #4）：与普通退出共用网关——确认对话先于脚本
+    // spawn，busy 期间两套流程互斥；取消/失败路径由网关撤销排空
+    const ok = await ctx.quit.requestUpdate()
+    if (ok !== 'proceed') return
+    ctx.updater.install() // 成功则内部经网关 confirmed 标记退出
+    // 应用未随之退出（如更新会话创建失败）：撤销排空，回到可用状态
+    if (ctx.quit.getStage() !== 'confirmed') ctx.quit.release()
+  })
 }

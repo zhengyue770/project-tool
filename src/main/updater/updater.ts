@@ -3,7 +3,8 @@ import type { UpdateState } from '../../shared/types'
 import { fetchLatestRelease, pickMacZipAsset, type FetchLike, type ReleaseAsset } from './feed'
 import { isNewerVersion } from './version'
 import { downloadToFile, type ProgressReport } from './downloader'
-import { ensureDirWritable, extractAndLocateApp, installAndRelaunch } from './installer'
+import { ensureDirWritable, extractAndLocateApp, installAndRelaunch, type InstallPlan } from './installer'
+import { openUpdateSession, stagingOf, type UpdateRecord } from './session'
 
 // 自动更新状态机（spec 2026-09-04 §6）：聚合 feed/downloader/installer，
 // 网络与副作用全部经构造函数注入（不 import electron），便于单测。
@@ -14,7 +15,10 @@ export type DownloadFn = (
   onProgress: (p: ProgressReport) => void
 ) => Promise<void>
 export type ExtractFn = (zipPath: string, destDir: string, appName: string) => Promise<string>
-export type InstallFn = (bundlePath: string, extractedApp: string, appPid: number) => void
+export type InstallFn = (plan: InstallPlan) => void
+export type OpenSessionFn = (
+  userDataDir: string, appPath: string, oldVersion: string, newVersion: string
+) => { record: UpdateRecord; sessionDir: string } | null
 export type WritableCheckFn = (dir: string) => void
 
 export interface UpdaterEnv {
@@ -29,9 +33,12 @@ export interface UpdaterEnv {
   appBundlePath: string | null
   /** 下载/解压缓存目录（应用启动时整体清空） */
   cacheDir: string
+  /** userData 目录（更新会话记录所在） */
+  userDataDir: string
   fetchImpl?: FetchLike
   download?: DownloadFn
   extract?: ExtractFn
+  openSession?: OpenSessionFn
   install?: InstallFn
   ensureWritable?: WritableCheckFn
   getPid?: () => number
@@ -138,14 +145,32 @@ export class AppUpdater {
     // downloaded 正常入口；error 允许重试（新 .app 已解压就位）
     if ((this.state.status !== 'downloaded' && this.state.status !== 'error')
       || !this.extractedApp || !this.env.appBundlePath) return
+    if (!this.state.remoteVersion) return
     if (this.env.appBundlePath.startsWith('/Volumes/')) {
       this.setState({ status: 'error', message: '应用正从安装镜像(dmg)运行，请先将其拖入「应用程序」文件夹后重试' })
       return
     }
     this.setState({ status: 'installing' })
+    // hardening 2c：先独占创建更新会话（会话目录/备份/暂存容器同 token 绑定），
+    // 再 spawn 替换脚本；任何位置已有残留 → 中止，交由启动清理处理
+    const session = (this.env.openSession ?? openUpdateSession)(
+      this.env.userDataDir, this.env.appBundlePath, this.env.currentVersion, this.state.remoteVersion
+    )
+    if (!session) {
+      this.setState({ status: 'error', message: '更新会话创建失败（可能存在上次更新的残留），请重启应用后重试' })
+      return
+    }
     try {
+      const plan: InstallPlan = {
+        appPid: (this.env.getPid ?? (() => process.pid))(),
+        bundlePath: this.env.appBundlePath,
+        extractedApp: this.extractedApp,
+        stagingApp: join(stagingOf(this.env.appBundlePath, session.record.token), 'app'),
+        backupPrev: join(session.record.backup, 'prev.app'),
+        sessionDir: session.sessionDir
+      }
       const doInstall = this.env.install ?? installAndRelaunch
-      doInstall(this.env.appBundlePath, this.extractedApp, (this.env.getPid ?? (() => process.pid))())
+      doInstall(plan)
     } catch (err) {
       this.setState({ status: 'error', message: `启动更新失败：${msg(err)}` })
       return

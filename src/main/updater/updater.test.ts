@@ -24,6 +24,17 @@ function makeEnv(over: Partial<UpdaterEnv> = {}): UpdaterEnv {
     arch: 'arm64',
     appBundlePath: '/Applications/项目启动器.app',
     cacheDir: '/tmp/update-cache',
+    userDataDir: '/tmp/pt-user',
+    openSession: () => ({
+      record: {
+        token: '0123456789abcdef',
+        oldVersion: '1.2.0',
+        newVersion: '1.3.0',
+        appPath: '/Applications/项目启动器.app',
+        backup: '/Applications/项目启动器.app.old.0123456789abcdef'
+      },
+      sessionDir: '/tmp/pt-user/update-sessions/0123456789abcdef'
+    }),
     fetchImpl: async () => new Response(JSON.stringify(RELEASE), { status: 200 }),
     download: vi.fn(async (
       _u: string, _d: string,
@@ -196,17 +207,34 @@ describe('AppUpdater.install', () => {
     return u
   }
 
-  it('downloaded → installing → 调用替换脚本并退出应用', async () => {
+  it('downloaded → installing → 建立更新会话并按计划 spawn 替换脚本、退出应用', async () => {
     const env = makeEnv()
-    const u = await ready(env)
+    const u = new AppUpdater(env)
+    await u.check()
+    await u.download()
     u.install()
     expect(u.getState().status).toBe('installing')
-    expect(env.install).toHaveBeenCalledWith(
-      '/Applications/项目启动器.app',
-      '/tmp/update-cache/extracted/项目启动器.app',
-      4321
-    )
+    expect(env.install).toHaveBeenCalledWith({
+      appPid: 4321,
+      bundlePath: '/Applications/项目启动器.app',
+      extractedApp: '/tmp/update-cache/extracted/项目启动器.app',
+      stagingApp: '/Applications/项目启动器.app.new.0123456789abcdef/app',
+      backupPrev: '/Applications/项目启动器.app.old.0123456789abcdef/prev.app',
+      sessionDir: '/tmp/pt-user/update-sessions/0123456789abcdef'
+    })
     expect(env.quitApp).toHaveBeenCalled()
+  })
+
+  it('hardening 2c：更新会话创建失败（残留）→ error 且不 spawn、不退出', async () => {
+    const env = makeEnv({ openSession: () => null })
+    const u = new AppUpdater(env)
+    await u.check()
+    await u.download()
+    u.install()
+    expect(u.getState().status).toBe('error')
+    expect(u.getState().message).toContain('会话')
+    expect(env.install).not.toHaveBeenCalled()
+    expect(env.quitApp).not.toHaveBeenCalled()
   })
 
   it('应用在 dmg（/Volumes）中运行 → error 且不替换', async () => {
