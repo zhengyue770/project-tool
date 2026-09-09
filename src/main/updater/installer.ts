@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process'
-import { accessSync, constants, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -21,13 +21,19 @@ export function ensureDirWritable(dir: string): void {
   accessSync(dir, constants.W_OK)
 }
 
-/** 解压 zip 到 destDir 并返回其中的 .app 路径；结构异常时抛错 */
+/** 解压 zip 到 destDir 并返回其中的 .app 路径；结构异常时抛错。
+ *  实测发现的两种布局都认：electron-builder 的 zip 会多套一层 mac/ 目录
+ *  （beta.2 实测暴露），自建 zip 则位于根目录——先找根，再找恰好一层深 */
 export async function extractAndLocateApp(zipPath: string, destDir: string, appName: string): Promise<string> {
   mkdirSync(destDir, { recursive: true }) // update-cache 启动即清空，解压前自建
   await execFileAsync('ditto', ['-x', '-k', zipPath, destDir])
-  const appPath = join(destDir, `${appName}.app`)
-  if (!existsSync(appPath)) throw new Error(`安装包内容异常：未找到 ${appName}.app`)
-  return appPath
+  const want = `${appName}.app`
+  if (existsSync(join(destDir, want))) return join(destDir, want)
+  for (const name of readdirSync(destDir)) {
+    const nested = join(destDir, name, want)
+    if (existsSync(nested)) return nested
+  }
+  throw new Error(`安装包内容异常：未找到 ${want}`)
 }
 
 /** 一次更新替换的完整计划（hardening 2c）：路径均由主进程在 spawn 前确定 */
