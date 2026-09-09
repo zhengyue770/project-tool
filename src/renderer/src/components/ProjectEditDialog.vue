@@ -2,7 +2,7 @@
 import { reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { FolderOpened, Plus, Delete, Refresh } from '@element-plus/icons-vue'
-import type { Project, QuickCommand } from '../../../shared/types'
+import type { Project, ProjectInput, QuickCommand } from '../../../shared/types'
 import { portPlaceholderNames } from '../../../shared/urlTemplate'
 import { applySync, filterExcluded } from '../../../shared/quickSync'
 import { api } from '../api'
@@ -46,7 +46,17 @@ const f = reactive({
   ideOptions: [] as string[],
   commands: [] as CmdRow[],
   urls: [] as Row<{ name: string; url: string }>[],
-  accounts: [] as Row<{ label: string; username: string; password: string; role: string }>[],
+  accounts: [] as Array<Row<{
+    label: string; username: string; password: string; role: string
+    /** hardening 批次四：锁定态（密文解不开）——不操作则保留存储密文 */
+    locked?: boolean
+    /** 锁定行的「重新录入」开关：打开后密码框可编辑 */
+    reenter?: boolean
+    /** 本次会话新增的账号：保存时显式提交密码（含合法空串），不走省略逻辑 */
+    isNew?: boolean
+    /** 加载时的原始密码：已有账号未变则不发（undefined 哨兵，主进程保留存储值） */
+    initialPassword: string
+  }>>,
   quick: [] as QuickRow[],
   quickSyncing: false,
   quickExcluded: [] as string[],
@@ -73,7 +83,15 @@ function init(): void {
       }))
     : [{ id: uid(), name: '启动', cmd: 'npm run dev', workdir: '.', port: '', portMode: 'fixed', successPattern: '' }]
   f.urls = p ? p.urls.map(u => ({ ...u })) : []
-  f.accounts = p ? p.accounts.map(a => ({ ...a })) : []
+  f.accounts = p
+    ? p.accounts.map(a => ({
+        id: a.id, label: a.label, username: a.username, role: a.role,
+        password: a.passwordLocked ? '' : a.password,
+        locked: !!a.passwordLocked,
+        isNew: false,
+        initialPassword: a.passwordLocked ? '' : a.password
+      }))
+    : []
   f.quick = p
     ? (p.quickCommands ?? []).map(q => ({ ...q, workdir: q.workdir ?? '' }))
     : []
@@ -190,7 +208,7 @@ async function save(): Promise<void> {
     const missing = portPlaceholderNames(u.url).find(n => !cmdNames.has(n))
     if (missing !== undefined) { ElMessage.warning(`页面地址引用了不存在的命令「${missing}」`); break }
   }
-  const project: Project = {
+  const project: ProjectInput = {
     id: f.id,
     name: f.name.trim(),
     path: f.path,
@@ -208,7 +226,14 @@ async function save(): Promise<void> {
           }
     }),
     urls: f.urls.map(u => ({ id: u.id, name: u.name.trim() || u.url, url: u.url.trim() })),
-    accounts: f.accounts.map(a => ({ id: a.id, label: a.label.trim(), username: a.username.trim(), password: a.password, role: a.role.trim() })),
+    // 密码提交规则（review 修正）：新账号显式提交（含合法空串）；锁定行仅在
+    // 「重新录入」且输入非空时提交（留空视为保留原密文）；已有账号未改动省略（哨兵）
+    accounts: f.accounts.map(a => {
+      const base = { id: a.id, label: a.label.trim(), username: a.username.trim(), role: a.role.trim() }
+      if (a.isNew) return { ...base, password: a.password }
+      if (a.locked) return a.reenter && a.password !== '' ? { ...base, password: a.password } : base
+      return a.password === a.initialPassword ? base : { ...base, password: a.password }
+    }),
     // 快捷命令按暂存顺序保存（空列表省略字段，保持 projects.json 干净）
     ...(f.quick.length ? {
       quickCommands: f.quick.map(q => q.source === 'manual'
@@ -353,11 +378,19 @@ async function save(): Promise<void> {
           <div v-for="(a, i) in f.accounts" :key="a.id" style="display: flex; gap: 8px; margin-bottom: 8px">
             <el-input v-model="a.label" placeholder="标签，如 管理员" style="width: 150px" />
             <el-input v-model="a.username" placeholder="用户名" style="flex: 1; min-width: 200px" />
-            <el-input v-model="a.password" placeholder="密码" show-password style="flex: 1; min-width: 200px" />
+            <template v-if="!a.locked || a.reenter">
+              <el-input v-model="a.password" placeholder="密码" show-password style="flex: 1; min-width: 200px" />
+            </template>
+            <template v-else>
+              <span style="flex: 1; min-width: 200px; color: #e6a23c; font-size: 12px; align-self: center">
+                密码暂不可用（本机钥匙串无法解密，原密文保留）
+              </span>
+              <el-button size="small" @click="a.reenter = true; a.password = ''">重新录入</el-button>
+            </template>
             <el-input v-model="a.role" placeholder="角色" style="width: 150px" />
             <el-button :icon="Delete" circle @click="f.accounts.splice(i, 1)" />
           </div>
-          <el-button :icon="Plus" size="small" @click="f.accounts.push({ id: uid(), label: '', username: '', password: '', role: '' })">添加账号</el-button>
+          <el-button :icon="Plus" size="small" @click="f.accounts.push({ id: uid(), label: '', username: '', password: '', role: '', isNew: true, initialPassword: '' })">添加账号</el-button>
         </div>
       </el-form-item>
     </el-form>

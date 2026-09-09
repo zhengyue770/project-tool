@@ -1,11 +1,11 @@
 import type {
-  AppSettings, BranchList, LogAppendPayload, MigrationResult, Project, ProjectView, StorageInfo, UpdateState
+  AppSettings, BranchList, LogAppendPayload, MigrationResult, Project, ProjectInput, ProjectView, StorageInfo, UpdateState
 } from '../../../shared/types'
 
 export interface RendererApi {
   listProjects(): Promise<ProjectView[]>
-  createProject(p: Project): Promise<void>
-  updateProject(id: string, p: Project): Promise<void>
+  createProject(p: ProjectInput): Promise<void>
+  updateProject(id: string, p: ProjectInput): Promise<void>
   deleteProject(id: string): Promise<void>
   startProject(id: string, commandId?: string): Promise<void>
   stopProject(id: string, commandId?: string): Promise<void>

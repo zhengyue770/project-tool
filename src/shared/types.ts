@@ -16,7 +16,26 @@ export interface CommandConfig {
   healthCheckUrl?: string // 覆盖默认探测地址 http://127.0.0.1:{port}（动态模式下忽略）
 }
 export interface UrlConfig { id: string; name: string; url: string }
-export interface Account { id: string; label: string; username: string; password: string; role: string }
+export interface Account {
+  id: string
+  label: string
+  username: string
+  password: string
+  role: string
+  /** hardening 批次四：密码密文解密失败（钥匙串不可用/换机器）——显示「暂不可用」，
+   *  保存时未改动即原样保留存储密文，可重新录入覆盖 */
+  passwordLocked?: boolean
+}
+/** 落盘的密码形态（hardening 批次四）：string=旧版明文（加载后静默迁移为密文）；
+ *  对象=密文。**类型判别而非内容嗅测**（用户明文密码也可能以 enc: 开头） */
+export type StoredPassword = string | { enc: string; data: string }
+/** 落盘的账号（密码可能为密文）；渲染层只见 Account（已解密或 locked 标记），
+ *  密文绝不经 IPC 回传 */
+export type StoredAccount = Omit<Account, 'password' | 'passwordLocked'> & { password: StoredPassword }
+/** 渲染层提交的账号输入：password 缺省（undefined）= 未改动，主进程保留存储原值 */
+export type AccountInput = Omit<Account, 'password' | 'passwordLocked'> & { password?: string }
+/** 渲染层提交的项目（账号为输入形态） */
+export type ProjectInput = Omit<Project, 'accounts'> & { accounts: AccountInput[] }
 export interface Project {
   id: string
   name: string
@@ -59,6 +78,9 @@ export interface RuntimeRecord {
   discoveredUrl?: string
   /** 快捷命令（任务模式）标记：restore 时只查 pid 存活即恢复 running，不探端口 */
   task?: boolean
+  /** hardening 2b：系统侧进程身份（ps lstart，spawn 后采集）——恢复接管与停止前
+   *  验证组长身份用，防 PID 复用误杀；无此字段（旧记录）视为不可信，不接管 */
+  lstart?: string
 }
 export type RuntimeFile = Record<string, RuntimeRecord>
 

@@ -1,12 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
-  AppSettings, BranchList, LogAppendPayload, MigrationResult, Project, ProjectView, StorageInfo, UpdateState
+  AppSettings, BranchList, LogAppendPayload, MigrationResult, Project, ProjectInput, ProjectView, StorageInfo, UpdateState
 } from '../shared/types'
 
 const api = {
   listProjects: (): Promise<ProjectView[]> => ipcRenderer.invoke('projects:list'),
-  createProject: (p: Project): Promise<void> => ipcRenderer.invoke('projects:create', p),
-  updateProject: (id: string, p: Project): Promise<void> => ipcRenderer.invoke('projects:update', id, p),
+  createProject: (p: ProjectInput): Promise<void> => ipcRenderer.invoke('projects:create', p),
+  updateProject: (id: string, p: ProjectInput): Promise<void> => ipcRenderer.invoke('projects:update', id, p),
   deleteProject: (id: string): Promise<void> => ipcRenderer.invoke('projects:delete', id),
   startProject: (id: string, commandId?: string): Promise<void> =>
     ipcRenderer.invoke('projects:start', id, commandId),
