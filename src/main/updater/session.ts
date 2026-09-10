@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -17,6 +18,17 @@ export interface UpdateRecord {
 }
 
 export const TOKEN_RE = /^[a-z0-9]{16,}$/
+
+/** beta.4 实测暴露：更新留下的树（ditto 解压产物）可能让 Node 的 rmSync 抛
+ *  ENOTDIR（rimraf 把 app.asar 误判为目录）——shell 的 rm -rf 实测能删动同
+ *  一棵树。作为兜底（参数是主进程生成的具体路径，无通配符） */
+function rmTree(dir: string): void {
+  try {
+    rmSync(dir, { recursive: true, force: true })
+  } catch {
+    execFileSync('/bin/rm', ['-rf', dir])
+  }
+}
 export function newToken(): string { return randomUUID().replace(/-/g, '').slice(0, 16) }
 
 export function sessionsRoot(userDataDir: string): string {
@@ -103,9 +115,9 @@ export function cleanupUpdateSessions(
       const prev = join(rec.backup, 'prev.app')
       if (isSymlink(rec.backup) || isSymlink(prev)) { keep('备份边界路径是符号链接'); continue }
       if (!existsSync(prev)) { keep('备份内无 prev.app'); continue }
-      // 四条件全满足：删除备份容器与会话目录（失败不阻断启动）
-      rmSync(rec.backup, { recursive: true, force: true })
-      rmSync(dir, { recursive: true, force: true })
+      // 四条件全满足：删除备份容器与会话目录（rmTree 带shell兜底；失败不阻断启动）
+      rmTree(rec.backup)
+      rmTree(dir)
       removed.push(rec.backup)
     } catch (err) {
       keep(`无法确认：${(err as Error).message}`)
