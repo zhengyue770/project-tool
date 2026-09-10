@@ -1,7 +1,7 @@
 {
   "name": "project-tool",
   "productName": "项目启动器",
-  "version": "1.3.0-beta.5",
+  "version": "1.3.0",
   "description": "本地项目启动管理工具 / A desktop app to launch, stop and monitor local dev projects",
   "author": "Moon <393020043@qq.com>",
   "license": "MIT",
