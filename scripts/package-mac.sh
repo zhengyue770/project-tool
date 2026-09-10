@@ -24,8 +24,13 @@ done
 
 echo "== 4/4 生成 dmg / zip（带拖入安装窗口）=="
 # --prepackaged：基于上面已签名的裸应用生成安装器，不会重新打包/破坏签名
-npx electron-builder --mac dmg zip --x64 --prepackaged "release/mac" >/dev/null
-npx electron-builder --mac dmg zip --arm64 --prepackaged "release/mac-arm64" >/dev/null
+# dmg 交给 electron-builder；zip 自建（根布局 项目启动器.app/）——electron-builder
+# 的 zip 会多套一层 mac/ 目录，beta.1 及更早客户端的解压定位只认根布局（beta.2 实测暴露）
+npx electron-builder --mac dmg --x64 --prepackaged "release/mac" >/dev/null
+npx electron-builder --mac dmg --arm64 --prepackaged "release/mac-arm64" >/dev/null
+for d in mac mac-arm64; do
+  (cd "release/$d" && ditto -c -k --sequesterRsrc --keepParent "项目启动器.app" "../project-tool-${VERSION}-$([ "$d" = mac ] && echo x64 || echo arm64).zip")
+done
 rm -f release/*.blockmap release/latest-mac.yml
 
 echo "打包完成："

@@ -16,7 +16,7 @@ async function copy(text: string, tip: string): Promise<void> {
 <template>
   <el-popover placement="bottom" :width="480" trigger="click">
     <template #reference>
-      <el-button :icon="User" :disabled="accounts.length === 0">账号</el-button>
+      <el-button :icon="User">账号</el-button>
     </template>
     <el-table :data="accounts" size="small">
       <el-table-column prop="label" label="标签" width="80" />
@@ -29,10 +29,15 @@ async function copy(text: string, tip: string): Promise<void> {
       </el-table-column>
       <el-table-column label="密码" min-width="140">
         <template #default="{ row }">
-          <span class="mono">{{ showPwd[row.id] ? row.password : '••••••' }}</span>
-          <el-button link size="small" :icon="showPwd[row.id] ? Hide : View"
-            @click="showPwd[row.id] = !showPwd[row.id]" />
-          <el-button link size="small" :icon="CopyDocument" @click="copy(row.password, '密码')" />
+          <template v-if="row.passwordLocked">
+            <span style="color: #e6a23c; font-size: 12px">暂不可用（钥匙串无法解密）</span>
+          </template>
+          <template v-else>
+            <span class="mono">{{ showPwd[row.id] ? row.password : '••••••' }}</span>
+            <el-button link size="small" :icon="showPwd[row.id] ? Hide : View"
+              @click="showPwd[row.id] = !showPwd[row.id]" />
+            <el-button link size="small" :icon="CopyDocument" @click="copy(row.password, '密码')" />
+          </template>
         </template>
       </el-table-column>
     </el-table>
