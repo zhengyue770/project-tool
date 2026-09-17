@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref, computed } from 'vue'
 import { ElConfigProvider } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Search } from '@element-plus/icons-vue'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import type { Project, ProjectView, UpdateState } from '../../shared/types'
 import { api } from './api'
@@ -36,8 +37,18 @@ function scheduleReload(): void {
 
 async function load(): Promise<void> { projects.value = await api.listProjects() }
 
+// 项目名检索：本地子串匹配（不区分大小写），关键词 trim 后为空 = 显示全部
+const keyword = ref('')
+const filtered = computed(() => {
+  const kw = keyword.value.trim().toLowerCase()
+  if (!kw) return projects.value
+  return projects.value.filter(p => p.name.toLowerCase().includes(kw))
+})
+
 async function startAll(): Promise<void> {
-  const targets = projects.value.filter(p => p.aggStatus !== 'running' && p.aggStatus !== 'starting')
+  // 0 命令项目无可启动对象，跳过（否则「已发起 N 个」数字虚高）
+  const targets = projects.value.filter(p =>
+    p.commands.length > 0 && p.aggStatus !== 'running' && p.aggStatus !== 'starting')
   if (!targets.length) return
   await Promise.allSettled(targets.map(p => api.startProject(p.id)))
   ElMessage.success(`已发起 ${targets.length} 个项目的启动`)
@@ -75,13 +86,17 @@ onUnmounted(() => { offEvents?.(); offUpdate?.() })
           <UpdateIndicator :state="updateState" @open-dialog="updateVisible = true" />
         </div>
         <div>
+          <el-input v-model="keyword" :prefix-icon="Search" clearable placeholder="搜索项目名称"
+            style="width: 200px; margin-right: 12px" />
           <el-button @click="startAll">全部启动</el-button>
           <el-button @click="settingsVisible = true">设置</el-button>
           <el-button type="primary" @click="editTarget = null; editVisible = true">添加项目</el-button>
         </div>
       </header>
       <el-empty v-if="projects.length === 0" description="还没有项目，点右上角「添加项目」开始" />
-      <ProjectCard v-for="p in projects" :key="p.id" :project="p"
+      <!-- 检索无结果与「没有任何项目」分开提示，方便区分是筛没了还是本来就没有 -->
+      <el-empty v-else-if="filtered.length === 0" description="没有匹配的项目" />
+      <ProjectCard v-for="p in filtered" :key="p.id" :project="p"
         @edit="editTarget = $event; editVisible = true"
         @logs="logsTarget = $event; logsVisible = true"
         @deleted="onDelete" />

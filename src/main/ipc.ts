@@ -17,6 +17,7 @@ import type { RuntimeStore } from './store/runtimeStore'
 import { migrateDataDir } from './store/migrator'
 import { scanQuickCommands } from './quick/scan'
 import { applySync, dropStartupDuplicates, filterExcluded, cleanExcluded } from '../shared/quickSync'
+import { removedLiveNames } from './projectGuard'
 import { mergeAccounts, projectToRenderer, type SafeCrypto } from './store/passwordCrypto'
 import type { AppUpdater } from './updater/updater'
 import type { GitBranchService } from './git/branch'
@@ -60,8 +61,8 @@ function toView(p: Project, m: ProcessManager, branches: GitBranchService): Proj
 function validateProject(p: Project): void {
   if (!p.name?.trim()) throw new Error('项目名称不能为空')
   if (!existsSync(p.path)) throw new Error(`项目路径不存在：${p.path}`)
-  if (!p.commands?.length) throw new Error('至少需要一条启动命令')
-  for (const c of p.commands) {
+  // 启动命令非必填：0 条合法（非前端/纯管理类项目），命令内部字段仍逐条校验
+  for (const c of p.commands ?? []) {
     if (!c.name?.trim()) throw new Error('命令名称不能为空')
     if (!c.cmd?.trim()) throw new Error('命令的启动命令不能为空')
     if (c.portMode === 'dynamic') {
@@ -145,6 +146,13 @@ export function registerIpc(ctx: IpcCtx): void {
     } as unknown as Project
     validateProject(p)
     const saved = autoSyncQuick({ ...p, id }) // 路径可能已变，重扫一遍
+    // review P2 守卫：被移除的命令（手动删除，或 autoSync 丢弃）进程组仍存活时拒绝
+    // 保存，提示先停止——判据是 hasLiveProcessGroup 真值而非展示状态（stop 进行中
+    // status 已是 stopped 但组未消亡，同样拦截）；不拦截会让进程失去停止入口成为孤儿
+    const removedLive = removedLiveNames(prior, saved, cid => manager.hasLiveProcessGroup(id, cid))
+    if (removedLive.length) {
+      throw new Error(`命令「${removedLive.join('、')}」仍在运行（或正在停止中），请先停止完成后再保存`)
+    }
     projectsStore.upsert(saved)
     void ctx.branches.refresh(id).then(() => pushEvent(id)) // 路径变了分支也可能变
   })
@@ -204,6 +212,11 @@ export function registerIpc(ctx: IpcCtx): void {
     const p = projectsStore.load().projects.find(x => x.id === projectId)
     if (!p) throw new Error('项目不存在')
     const next = autoSyncQuick(p)
+    // 同步丢弃进程组仍存活的快捷命令同样拦截（与 update 守卫同一原则：先停止再移除）
+    const removedLive = removedLiveNames(p, next, cid => manager.hasLiveProcessGroup(projectId, cid))
+    if (removedLive.length) {
+      throw new Error(`同步将移除仍在运行的命令「${removedLive.join('、')}」，请先停止再同步`)
+    }
     projectsStore.upsert(next)
     pushEvent(projectId) // 卡片同步刷新
     return toView(next, manager, ctx.branches)

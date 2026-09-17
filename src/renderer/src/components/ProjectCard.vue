@@ -146,13 +146,19 @@ async function onSwitchBranch(branch: string): Promise<void> {
           </template>
         </el-dropdown>
       </div>
-      <el-tag :type="AGG_META[project.aggStatus].type" effect="dark">
+      <el-tag v-if="project.commands.length" :type="AGG_META[project.aggStatus].type" effect="dark">
         {{ AGG_META[project.aggStatus].label }}
       </el-tag>
+      <!-- 启动命令非必填：0 条时聚合状态无意义，用中性标签替代误导性的「已停止」 -->
+      <el-tag v-else type="info" effect="plain">未配置启动</el-tag>
     </div>
     <div style="color: #909399; font-size: 12px; margin: 4px 0 10px">{{ project.path }}</div>
 
-    <div v-if="project.commands.length > 1" v-for="c in project.commands" :key="c.id"
+    <!-- 0 命令项目：不渲染命令状态行，仅一行提示（启动命令非必填） -->
+    <div v-if="project.commands.length === 0" style="color: #909399; font-size: 12px; margin-bottom: 6px">
+      未配置启动命令
+    </div>
+    <div v-else-if="project.commands.length > 1" v-for="c in project.commands" :key="c.id"
       style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px">
       <span :style="{ background: CMD_META[st(c.id)].color, width: '8px', height: '8px', borderRadius: '4px' }" />
       <span style="min-width: 60px">{{ c.name }}</span>
@@ -172,10 +178,13 @@ async function onSwitchBranch(branch: string): Promise<void> {
     </div>
 
     <div style="display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center">
-      <el-button v-if="project.aggStatus !== 'running' && project.aggStatus !== 'starting'"
-        type="primary" :icon="CaretRight" @click="api.startProject(project.id)">启动</el-button>
-      <el-button v-else type="danger" plain :icon="SwitchButton"
-        @click="api.stopProject(project.id)">停止</el-button>
+      <!-- 0 命令项目没有可启停的对象，卡片级启停按钮整组隐藏 -->
+      <template v-if="project.commands.length">
+        <el-button v-if="project.aggStatus !== 'running' && project.aggStatus !== 'starting'"
+          type="primary" :icon="CaretRight" @click="api.startProject(project.id)">启动</el-button>
+        <el-button v-else type="danger" plain :icon="SwitchButton"
+          @click="api.stopProject(project.id)">停止</el-button>
+      </template>
       <el-button v-for="u in project.urls" :key="u.id" :icon="Link"
         @click="openUrl(u)">{{ u.name }}</el-button>
       <AccountsPopover v-if="project.accounts.length" :accounts="project.accounts" />

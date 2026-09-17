@@ -168,6 +168,15 @@ export class ProcessManager {
     return url ? portFromUrl(url) : null // 复用 health.portFromUrl（尾部数字即端口）
   }
 
+  /** 保存守卫真值源（review P2 第二轮）：该命令的进程组是否仍存活
+   *  （kill(-pid,0) 成功或 EPERM=组内有进程）。**与展示状态无关**——stop()
+   *  先同步置 stopped 再异步杀组的窗口内仍为 true，停止失败恢复运行态亦然；
+   *  从未启动/组确认消亡为 false。无法确认（EPERM）按存活处理，宁保守拒绝保存 */
+  hasLiveProcessGroup(projectId: string, commandId: string): boolean {
+    const e = this.entries.get(runtimeKey(projectId, commandId))
+    return e?.pid !== undefined && this.groupAlive(e.pid)
+  }
+
   start(project: Project, command: CommandConfig): void {
     const k = runtimeKey(project.id, command.id)
     const e = this.entry(k)

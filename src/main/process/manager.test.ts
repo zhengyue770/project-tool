@@ -861,3 +861,46 @@ describe('跳读拼接修正', () => {
     expect(logs.some(l => l.includes('\uFFFD'))).toBe(false)    // 半个汉字未变成替换字符
   })
 })
+
+// review P2（第二轮）：保存守卫的真值源——不看展示状态，看进程组是否仍存活。
+// stop() 先同步置 stopped 再异步杀组：窗口期内 statusOf 已是 stopped，但组未消亡；
+// 停止失败还会恢复运行态。守卫凭 hasLiveProcessGroup 在这两种情况下都拒绝保存
+describe('hasLiveProcessGroup（保存守卫真值源）', () => {
+  it('未启动 → false（可自由移除）', () => {
+    const m = mkManager()
+    expect(m.hasLiveProcessGroup('p1', 'c1')).toBe(false)
+  })
+
+  it('停止尚未完成（status 已 stopped、进程组仍活）→ true，守卫拒绝保存', async () => {
+    const p = port()
+    const proj = mkProject(p, `node ${FIXTURE} ${p} 0 ignore-term`)
+    const m = mkManager({ killGraceMs: 800 })
+    m.start(proj, proj.commands[0])
+    await waitFor(() => m.statusOf('p1', 'c1') === 'running')
+    const stopping = m.stop('p1', 'c1') // 不等待：status 同步翻 stopped，杀组在后台走
+    await waitFor(() => m.statusOf('p1', 'c1') === 'stopped') // 窗口期：状态已停、组仍活
+    expect(m.hasLiveProcessGroup('p1', 'c1')).toBe(true)
+    // 端到端：此刻保存空命令列表会被守卫拦下
+    const { removedLiveNames } = await import('../projectGuard')
+    expect(removedLiveNames(proj, { ...proj, commands: [] }, cid => m.hasLiveProcessGroup('p1', cid)))
+      .toEqual(['srv'])
+    await stopping // 等 stop 完成（SIGKILL 兜底）→ 组确认消亡后放行
+    await waitFor(() => !m.hasLiveProcessGroup('p1', 'c1'))
+    expect(removedLiveNames(proj, { ...proj, commands: [] }, cid => m.hasLiveProcessGroup('p1', cid)))
+      .toEqual([])
+  })
+
+  it('停止失败恢复运行态 → 仍 true（守卫拒绝保存）', async () => {
+    const p = port()
+    const proj = mkProject(p, `node ${FIXTURE} ${p} 0 ignore-term`)
+    const m = mkManager()
+    m.start(proj, proj.commands[0])
+    await waitFor(() => m.statusOf('p1', 'c1') === 'running')
+    const anyM = m as unknown as { signalGroup: (pid: number) => Promise<string> }
+    anyM.signalGroup = async () => 'still-alive' // 模拟杀不掉（信号发出但组不消亡）
+    await expect(m.stop('p1', 'c1')).rejects.toThrow()
+    delete anyM.signalGroup
+    expect(m.statusOf('p1', 'c1')).toBe('running') // 状态已恢复
+    expect(m.hasLiveProcessGroup('p1', 'c1')).toBe(true)
+  })
+})

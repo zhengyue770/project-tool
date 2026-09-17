@@ -164,7 +164,7 @@ async function pickPath(): Promise<void> {
 function validate(): string | null {
   if (!f.name.trim()) return '请填写项目名称'
   if (!f.path.trim()) return '请选择项目路径'
-  if (f.commands.length === 0) return '至少配置一条启动命令'
+  // 启动命令非必填（可为 0 条）；已配置的命令内部字段仍逐条校验
   for (const c of f.commands) {
     if (!c.name.trim() || !c.cmd.trim()) return '命令的名称和启动命令不能为空'
     if ((c.portMode ?? 'fixed') === 'dynamic') {
@@ -207,6 +207,10 @@ async function save(): Promise<void> {
   for (const u of f.urls) {
     const missing = portPlaceholderNames(u.url).find(n => !cmdNames.has(n))
     if (missing !== undefined) { ElMessage.warning(`页面地址引用了不存在的命令「${missing}」`); break }
+  }
+  // 无启动命令时任何端口占位符（含无名 {{port}}）都无法解析，保存前同样只警告（点击地址时 resolveUrl 报错）
+  if (f.commands.length === 0 && f.urls.some(u => u.url.includes('{{port'))) {
+    ElMessage.warning('未配置启动命令，页面地址中的端口占位符将无法解析')
   }
   const project: ProjectInput = {
     id: f.id,
@@ -284,11 +288,12 @@ async function save(): Promise<void> {
         </div>
       </el-form-item>
 
-      <el-form-item label="启动命令" required>
+      <el-form-item label="启动命令">
         <div style="width: 100%">
           <div class="section-help">
             <p>一条命令对应一个要启动的服务：前后端分离的项目可点「添加命令」配多条（如一条后端 + 一条前端），</p>
             <p>项目「启动」会全部拉起，并分别显示各自状态。</p>
+            <p>不需要启动的项目（非前端/纯管理等）可删掉全部命令，保存后仅保留项目管理与快捷命令功能。</p>
             <p>子目录：命令在项目文件夹内的哪个文件夹执行，"." 表示项目根目录本身；只有 monorepo 等需要在子文件夹里跑时才需要改。</p>
             <p>固定端口：填命令实际监听的端口（如 vite 默认 5173），用于判定启动成功；</p>
             <p>动态获取：端口会变的项目（被占自动换端口）选它，将从启动日志自动识别真实端口。</p>
